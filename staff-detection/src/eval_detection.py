@@ -1,5 +1,3 @@
-"""Measure how often YOLO finds the staff member at the hand-labelled points in gt.csv."""
-
 import argparse
 import csv
 import math
@@ -15,7 +13,9 @@ ROOT = Path(__file__).resolve().parent.parent
 MISSES_DIR = ROOT / "outputs" / "misses"
 ANGLE_STEPS = 1440  # panorama width: one column per 0.25 degree
 PROBE_FRAMES = 50
-SETTINGS = [(640, 0.25), (1440, 0.25), (1440, 0.10)]  # (imgsz, conf)
+DEFAULT_IMGSZ = 1440
+DEFAULT_CONF = 0.25
+SETTINGS = [(640, 0.25), (1440, 0.25), (1440, 0.10), (1600, 0.25)]  # (imgsz, conf) for --compare
 BORDER_THRESHOLD = 20
 SEAM_PAD = 0.10  # fraction of panorama columns repeated past the right edge
 SEAM_OVERLAP = 0.6  # overlap (intersection / smaller box) above which two seam boxes are one person
@@ -26,6 +26,10 @@ def parse_args():
     parser.add_argument("--video", default=str(ROOT / "data" / "sample.mp4"))
     parser.add_argument("--gt", default=str(ROOT / "data" / "gt.csv"))
     parser.add_argument("--unwarp", choices=["auto", "on", "off"], default="auto")
+    parser.add_argument("--imgsz", type=int, default=DEFAULT_IMGSZ)
+    parser.add_argument("--conf", type=float, default=DEFAULT_CONF)
+    parser.add_argument("--compare", action="store_true",
+                        help="evaluate every entry in SETTINGS instead of --imgsz/--conf")
     return parser.parse_args()
 
 
@@ -260,7 +264,7 @@ def main():
     model = YOLO(str(ROOT / "yolov8n.pt"))
     probe_frames = [frames[i] for i in range(PROBE_FRAMES) if i in frames]
     rows = []
-    for imgsz, conf in SETTINGS:
+    for imgsz, conf in SETTINGS if args.compare else [(args.imgsz, args.conf)]:
         print(f"imgsz {imgsz} / conf {conf}")
         use_pano = choose_view(args.unwarp, model, probe_frames, circle, imgsz, conf)
         rows.append(evaluate_setting(model, frames, gt_points, circle, use_pano, imgsz, conf))
