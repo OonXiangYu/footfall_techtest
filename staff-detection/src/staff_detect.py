@@ -23,7 +23,8 @@ from ultralytics import YOLO
 from crops import box_chest_point, upright_crop
 from detections import choose_view, detect_people, rows_per_frame
 from fisheye import ANGLE_STEPS, circle_for, owning_box, to_original_point, to_panorama_point
-from linking import chain_ids, link_tracks, track_summaries
+from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, MAX_LINK_DIST, chain_ids, link_tracks,
+                     track_summaries)
 from tag_crops import interpolate_chest
 from tag_match import TAG_SIZE, extract_pdf_photo, find_pdf_tag, match, template_variants
 from tracker import Tracker
@@ -50,12 +51,15 @@ def parse_args():
     parser.add_argument("--max-dist", type=float, default=0.05,
                         help="tracker gate, fraction of the radius (0.05 ~ staff max speed; wider gates swap people)")
     parser.add_argument("--max-missed", type=float, default=1.0, help="seconds a track may go unmatched")
-    parser.add_argument("--link-gap", type=float, default=1.5, help="max seconds between linked tracklets")
-    parser.add_argument("--link-speed", type=float, default=0.01,
+    parser.add_argument("--link-gap", type=float, default=LINK_GAP, help="max seconds between linked tracklets")
+    parser.add_argument("--link-speed", type=float, default=LINK_SPEED,
                         help="link distance per frame of gap, fraction of the radius (~ staff median speed)")
-    parser.add_argument("--link-margin", type=float, default=0.05, help="extra link distance, fraction of the radius")
-    parser.add_argument("--max-link-dist", type=float, default=0.20,
+    parser.add_argument("--link-margin", type=float, default=LINK_MARGIN,
+                        help="extra link distance, fraction of the radius")
+    parser.add_argument("--max-link-dist", type=float, default=MAX_LINK_DIST,
                         help="cap on the link distance, fraction of the radius")
+    parser.add_argument("--link-ratio", type=float, default=LINK_RATIO,
+                        help="ratio test for links: only link when clearly the best option; 0 turns it off")
     parser.add_argument("--tag-threshold", type=float, default=0.80, help="--tag auto: template score for a hit")
     parser.add_argument("--tag-every", type=int, default=5, help="--tag auto: score tags every N frames")
     parser.add_argument("--min-hits", type=int, default=2, help="tag hits for a chain to count as staff")
@@ -147,9 +151,9 @@ def track(detections, frame_rows, max_dist, max_missed):
     return ids
 
 
-def link(detections, track_ids, max_gap, speed, margin, max_distance):
+def link(detections, track_ids, max_gap, speed, margin, max_distance, ratio=None):
     summaries = track_summaries(detections["frame"], detections["point"], track_ids)
-    successor = link_tracks(summaries, max_gap, speed, margin, max_distance)
+    successor = link_tracks(summaries, max_gap, speed, margin, max_distance, ratio)
     chains = chain_ids(summaries, successor)
     return np.array([chains[t] for t in track_ids], int), len(summaries), len(successor)
 
@@ -318,7 +322,9 @@ def main():
     speed, margin, cap = args.link_speed * radius, args.link_margin * radius, args.max_link_dist * radius
     print(f"   link gate: min({speed:.1f} px/frame x gap + {margin:.1f} px, {cap:.1f} px); "
           f"at the longest gap ({max_gap} frames) that is {min(speed * max_gap + margin, cap):.1f} px")
-    chains, track_count, link_count = link(detections, track_ids, max_gap, speed, margin, cap)
+    ratio = args.link_ratio if args.link_ratio > 0 else None
+    print(f"   link ratio test: {ratio or 'off'}")
+    chains, track_count, link_count = link(detections, track_ids, max_gap, speed, margin, cap, ratio)
     timings["linking"] = time.perf_counter() - start
     print(f"3. linking: {link_count} links, {track_count} tracks -> {len(set(chains.tolist()))} chains")
 

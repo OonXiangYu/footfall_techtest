@@ -10,6 +10,8 @@ from detections import rows_per_frame
 from eval_detection import ROOT, load_gt_points
 from fisheye import ANGLE_STEPS, to_panorama_point
 from eval_tracking import count_id_changes, id_color, staff_track_id
+from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, MAX_LINK_DIST, chain_ids, link_tracks,
+                     track_summaries)
 from tracker import Tracker
 
 MAX_MISSED_SECONDS = 1.0
@@ -20,6 +22,12 @@ SETTINGS = [  # (name, max_dist as a fraction of the radius, use velocity)
     ("dist0.10", 0.10, True),
     ("dist0.20", 0.20, True),
     (f"dist{DEFAULT_GATE:.2f}_novel", DEFAULT_GATE, False),
+]
+LINK_SETTINGS = [  # (name, max gap in seconds, ratio test or None); tracker at DEFAULT_GATE
+    ("gap1.5s", 1.5, None),
+    ("ratio0.5", 1.5, 0.5),
+    ("gap4s", 4.0, None),
+    (f"default (r{LINK_RATIO}, {LINK_GAP:g}s)", LINK_GAP, LINK_RATIO),
 ]
 COMPARE_RANGE = (300, 600)  # same frames as the ByteTrack run
 TRAIL_LENGTH = 15
@@ -86,6 +94,38 @@ def evaluate(name, detections, frame_rows, gt_points, max_dist_fraction, use_vel
             "median_length": float(np.median(list(Counter(ids.tolist()).values()))),
             "changes": count_id_changes(list(staff.values())),
             "changes_in_range": count_id_changes(in_range)}
+
+
+# tracker (DEFAULT_GATE) + linking; the chain that owns the GT point is the staff chain at that frame
+def evaluate_linking(name, detections, frame_rows, gt_points, max_gap_seconds, ratio):
+    radius, fps = float(detections["radius"]), float(detections["fps"])
+    ids = run_tracker(detections, frame_rows, DEFAULT_GATE * radius, round(MAX_MISSED_SECONDS * fps), True)
+    summaries = track_summaries(detections["frame"], detections["point"], ids)
+    successor = link_tracks(summaries, round(max_gap_seconds * fps), LINK_SPEED * radius,
+                            LINK_MARGIN * radius, MAX_LINK_DIST * radius, ratio)
+    chain_of = chain_ids(summaries, successor)
+    chains = np.array([chain_of[t] for t in ids], int)
+    staff = staff_ids_at_gt(detections, frame_rows, chains, gt_points)
+    purity = track_purity(staff, chains, frame_rows)
+    on_point, total = (sum(p[i] for p in purity.values()) for i in (0, 1))
+    return {"name": name, "links": len(successor), "chains": len(set(chains.tolist())), "staff": staff,
+            "purity": purity, "purity_rate": on_point / total if total else float("nan"),
+            "covered": sum(s is not None for s in staff.values()), "changes": count_id_changes(list(staff.values()))}
+
+
+def print_link_table(rows, labelled):
+    print(f"\nLinking (tracker gate {DEFAULT_GATE}); staff chain = chain owning the GT point")
+    print(f"{'setting':<22}{'purity':>8}{'impure chains':>15}{'covered':>10}{'chain changes':>15}"
+          f"{'links':>7}{'chains':>8}")
+    for row in rows:
+        impure = sum(on < total for on, total in row["purity"].values())
+        impure_text = f"{impure}/{len(row['purity'])}"
+        covered = f"{row['covered']}/{labelled}"
+        print(f"{row['name']:<22}{row['purity_rate']:>8.0%}{impure_text:>15}{covered:>10}{row['changes']:>15}"
+              f"{row['links']:>7}{row['chains']:>8}")
+    for row in rows:
+        impure = [f"{i}:{on}/{total}" for i, (on, total) in row["purity"].items() if on < total]
+        print(f"  {row['name']} impure chains (id:on GT/labelled frames present): {' '.join(impure) or 'none'}")
 
 
 def print_table(rows):
@@ -160,6 +200,10 @@ def main():
     rows = [evaluate(name, detections, frame_rows, gt_points, fraction, use_velocity)
             for name, fraction, use_velocity in SETTINGS]
     print_table(rows)
+
+    link_rows = [evaluate_linking(name, detections, frame_rows, gt_points, gap, ratio)
+                 for name, gap, ratio in LINK_SETTINGS]
+    print_link_table(link_rows, len(gt_points))
 
     # purity first: few ID changes can also mean the track swapped onto someone else
     best = max(rows, key=lambda r: (r["purity_rate"], -r["changes"]))
