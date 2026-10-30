@@ -1,0 +1,14 @@
+number,decision,alternative,default,metric,alternative_value,default_value
+1,detection view,original frame,panorama,staff hits of 55,15,47
+1,detection view,original frame,panorama,boxes / frame,2.8,15.7
+2,detection conf,0.10,0.25,staff hits of 55,48,47
+2,detection conf,0.10,0.25,boxes / frame,37.9,15.7
+3,tracker gate,0.20 R,0.05 R,track purity,0.3456,0.9792
+3,tracker gate,0.20 R,0.05 R,staff track changes,19,28
+4,linking ratio test,off,0.5,chain purity,0.395,0.9792
+4,linking ratio test,off,0.5,staff chain changes,20,25
+5,duplicate-box removal,off,on,chain purity,0.9792,0.9792
+5,duplicate-box removal,off,on,staff chain changes,29,25
+5,duplicate-box removal,off,on,"chain on the seated stretch (frames 0-347), frames",229,348
+6,final result,,sample_confirmed.json,hits of 55,,50
+6,final result,,sample_confirmed.json,median error (px),,15.6

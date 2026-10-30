@@ -435,7 +435,7 @@ def build_chains(args, out, fps, frame_count, timings):
     timings["linking"] = time.perf_counter() - start
     print(f"3. linking: {link_count} links, {track_count} tracks -> {len(set(chains.tolist()))} chains")
     return {"detections": detections, "frame_rows": frame_rows, "keep": keep, "all_rows": all_rows,
-            "hists": hists, "chains": chains, "radius": radius, "frame_count": frame_count, "max_gap": max_gap,
+            "track_ids": track_ids, "hists": hists, "chains": chains, "radius": radius, "frame_count": frame_count, "max_gap": max_gap,
             "max_hold": round(args.max_hold * fps), "switch_penalty": args.switch_penalty * radius}
 
 

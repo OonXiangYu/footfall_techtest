@@ -171,11 +171,11 @@ The evaluation compares against the hand labels in `data\`, so it needs the samp
 .venv\Scripts\python.exe eval\reproduce.py
 ```
 
-It runs the pipeline with the final confirmations (`--no-review`), then the four scripts below.
+It runs the pipeline with the final confirmations (`--no-review`), then the five scripts below.
 Each script's output goes to `outputs\reproduce\logs\`. At the end it prints each number next to
-the value in `results\summary.md`, checks that `staff.csv` is identical to `results\staff.csv`,
-and exits with an error if anything differs. Add `--keep-caches` on later runs to reuse the
-detections and appearance caches.
+the value in `results\summary.md`. It also checks that `staff.csv` and `decisions.csv` match
+`results\staff.csv` and `results\decisions.csv`, and exits with an error if anything differs. Add
+`--keep-caches` on later runs to reuse the detections and appearance caches.
 
 | step | question it answers | time |
 |---|---|---|
@@ -184,6 +184,26 @@ detections and appearance caches.
 | `eval\eval_linking.py <run>` | which tracker gate and linking settings keep one person per track (purity)? | ~14 s |
 | `eval\eval_run.py <run>` | how close is the output to the labels: hits, presence, per-track and frame-by-frame errors? | ~1 s |
 | `eval\eval_review.py <run>` | how much does a short review give: candidate ranking, simulated users, expansion threshold? | ~30 s (6 s with caches) |
+| `eval\decisions.py --run <run>` | what does each key decision buy, against its alternative with everything else unchanged? | ~25 s |
+
+### Key decisions
+
+`eval\decisions.py` runs each decision as an ablation on the sample video: the current default
+against the alternative, with everything else unchanged. It writes one table to
+`results\decisions.md` and `results\decisions.csv`, and one bar chart per decision to
+`results\decisions.png`:
+
+1. detection view: original frame vs panorama (staff hits, boxes per frame);
+2. detection confidence: 0.10 vs 0.25 (staff hits, boxes per frame);
+3. tracker gate: 0.20 vs 0.05 of the radius (track purity, staff track changes);
+4. linking ratio test: off vs 0.5 (chain purity, staff chain changes);
+5. duplicate-box removal: off vs on (chain purity, staff chain changes, and the chain covering
+   the seated stretch, frames 0-347);
+6. the final result with `examples\sample_confirmed.json` (hits, median error).
+
+Decisions 1-2 run the detector on the 55 labelled frames. Decisions 3-6 reuse the detection and
+appearance caches of a run folder (`--run`, default `outputs\reproduce`) and pass the alternative
+as a `staff_detect.py` flag: `--max-dist 0.20`, `--link-ratio 0`, `--keep-duplicates`.
 
 In total it takes about 5 minutes from scratch and under a minute with `--keep-caches`, measured
 on the development machine. Each script also runs on its own, for example
@@ -203,7 +223,7 @@ data/       hand labels: gt.csv (chest point ~1 per second), tag_gt.csv / tag_gt
             (tag visibility), tag_pos.csv (tag centres) for the sample video
 models/     tag_classifier.npz (the tag model that ranks review candidates)
 examples/   sample_confirmed.json (the final review's confirmations)
-results/    staff.csv, plots and summary.md of the final run
+results/    staff.csv, plots and summary.md of the final run; decisions.md / .csv / .png
 outputs/    run folders (not in git)
 ```
 

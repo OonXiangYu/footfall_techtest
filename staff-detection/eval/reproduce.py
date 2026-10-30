@@ -8,9 +8,10 @@ Runs, in order:
   3. eval/eval_linking.py    tracker gate and linking settings
   4. eval/eval_run.py        hits, presence and frame-by-frame diagnostics of the run
   5. eval/eval_review.py     simulated review users
+  6. eval/decisions.py       the key decisions as ablations (saved to <out>/decisions/, not results/)
 Each step's output is shown and saved to <out>/logs/. At the end: the numbers next to the expected
-values read from results/summary.md, whether staff.csv is identical to results/staff.csv, and the
-run time of each step. Exits with 1 if anything differs.
+values read from results/summary.md, whether staff.csv and decisions.csv match results/staff.csv and
+results/decisions.csv, and the run time of each step. Exits with 1 if anything differs.
 
 The run starts from scratch: <out> is cleared first (only a folder this script created, marked with
 a .reproduce file). --keep-caches reuses its detections and appearance caches instead (much faster;
@@ -19,7 +20,6 @@ the numbers are the same).
 
 import argparse
 import contextlib
-import filecmp
 import io
 import os
 import re
@@ -36,6 +36,7 @@ from labels import DATA, ROOT
 
 SUMMARY = ROOT / "results" / "summary.md"
 EXPECTED_CSV = ROOT / "results" / "staff.csv"
+EXPECTED_DECISIONS = ROOT / "results" / "decisions.csv"
 CONFIRMED = ROOT / "examples" / "sample_confirmed.json"
 MARKER = ".reproduce"
 
@@ -95,6 +96,11 @@ def detection_values(log_path):
     return values
 
 
+def same_lines(a, b):
+    """Same text, whatever the line endings (git may check files out with LF or CRLF)."""
+    return Path(a).read_text(encoding="utf-8").splitlines() == Path(b).read_text(encoding="utf-8").splitlines()
+
+
 def of(part, whole, decimals=None):
     text = f"{part} of {whole}"
     return text if decimals is None else f"{text} ({part / whole:.{decimals}%})"
@@ -145,6 +151,8 @@ def main():
         ("eval_linking", [ROOT / "eval" / "eval_linking.py", out, "--video", args.video, "--gt", gt]),
         ("eval_run", [ROOT / "eval" / "eval_run.py", out, "--gt", gt]),
         ("eval_review", [ROOT / "eval" / "eval_review.py", out, "--video", args.video, "--gt", gt]),
+        ("decisions", [ROOT / "eval" / "decisions.py", "--video", args.video, "--gt", gt, "--run", out,
+                       "--results", out / "decisions"]),
     ]
     start = time.perf_counter()
     timings = {name: run_step(name, command, logs / f"{name}.txt") for name, command in steps}
@@ -162,9 +170,11 @@ def main():
         mismatches += not ok
         label = row if column == 0 else f"{row}: boxes / frame"
         print(f"{label[:71]:<72}{want:>18}{value:>18}  {'ok' if ok else 'DIFFERS'}")
-    same_csv = filecmp.cmp(out / "staff.csv", EXPECTED_CSV, shallow=False)
-    mismatches += not same_csv
+    same_csv = same_lines(out / "staff.csv", EXPECTED_CSV)
+    same_decisions = same_lines(out / "decisions" / "decisions.csv", EXPECTED_DECISIONS)
+    mismatches += (not same_csv) + (not same_decisions)
     print(f"\nstaff.csv identical to results/staff.csv: {'yes' if same_csv else 'NO'}")
+    print(f"decisions.csv identical to results/decisions.csv: {'yes' if same_decisions else 'NO'}")
     print("Run time: " + ", ".join(f"{name} {seconds:.0f} s" for name, seconds in timings.items())
           + f"; total {total / 60:.1f} min")
     print(f"Logs: {logs}")

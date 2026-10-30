@@ -49,12 +49,12 @@ def read_frames(video_path, wanted):
     return frames
 
 
-def evaluate_view(model, frames, gt_points, circle, use_pano):
+def evaluate_view(model, frames, gt_points, circle, use_pano, conf=CONF):
     name = "panorama" if use_pano else "original frame"
-    detect_view(model, frames[min(gt_points)], circle, use_pano, IMGSZ, CONF)  # warm-up, not timed
+    detect_view(model, frames[min(gt_points)], circle, use_pano, IMGSZ, conf)  # warm-up, not timed
     hits, times, box_counts = 0, [], []
     for index, (x, y) in tqdm(sorted(gt_points.items()), desc=name, leave=False):
-        _, boxes, elapsed_ms = detect_view(model, frames[index], circle, use_pano, IMGSZ, CONF)
+        _, boxes, elapsed_ms = detect_view(model, frames[index], circle, use_pano, IMGSZ, conf)
         point = to_panorama_point(x, y, *circle) if use_pano else (x, y)
         times.append(elapsed_ms)
         box_counts.append(len(boxes))
