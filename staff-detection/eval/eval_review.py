@@ -1,5 +1,7 @@
 """Simulate the semi-automatic mode (staff_detect.py --tag review) with the hand labels in data/gt.csv.
 
+    python eval/eval_review.py outputs/run
+
 - Candidate ranking: how many of the top 5 / 10 / 20 candidates are really the staff member.
 - Simulated users: one who confirms every true staff candidate on page 1 (and on pages 1-2), and the
   earlier one who confirms one candidate per outfit (2 or 3 clicks); each scored with whole-chain and
@@ -11,19 +13,19 @@ Uses the run folder's caches (detections.npz, appearance.npz, tag_scores_review.
 """
 
 import argparse
+import sys
 from pathlib import Path
 
-from eval_chain_evidence import staff_chain_per_frame
-from eval_detection import load_gt_points
-from eval_pipeline import position_metrics, read_rows
+from eval_run import position_metrics, read_rows, staff_chain_per_frame
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from appearance import similarity
 from fisheye import ANGLE_STEPS, owning_box, to_panorama_point
+from labels import DATA, interpolate_chest, load_gt_points
 from review import (CANDIDATES_PER_CHAIN, CONFIRM_WINDOW, EXPAND_MARGIN, EXPAND_SIMILARITY,
                     EXPAND_SPEED, MIN_CHAIN_SECONDS, PER_PAGE, candidates, chain_summaries, expand, staff_from_clicks)
 from staff_detect import build_chains, parse_args as pipeline_args, review_scores, staff_per_frame, video_info
-from tag_crops import interpolate_chest
 
-ROOT = Path(__file__).resolve().parent.parent
 THRESHOLDS = [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9]
 TARGET_PURITY = 0.95
 NEAR_LABEL = 12  # frames: a labelled frame this close decides a candidate's truth via its chain
@@ -32,8 +34,8 @@ NEAR_LABEL = 12  # frames: a labelled frame this close decides a candidate's tru
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run", help="output folder for the review mode (its caches are reused or created)")
-    parser.add_argument("--video", default=str(ROOT / "data" / "sample.mp4"))
-    parser.add_argument("--gt", default=str(ROOT / "data" / "gt.csv"))
+    parser.add_argument("--video", default=str(DATA / "sample.mp4"))
+    parser.add_argument("--gt", default=str(DATA / "gt.csv"))
     return parser.parse_args()
 
 

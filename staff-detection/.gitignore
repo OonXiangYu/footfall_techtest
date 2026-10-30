@@ -1,6 +1,15 @@
 .venv/
 __pycache__/
 *.pt
+
+# company material: not published
 data/*.mp4
-outputs/*
-!outputs/.gitkeep
+data/*.pdf
+
+# run outputs, and images that show video frames
+outputs/
+results/*.mp4
+results/figures/
+
+# labelling and training tools: kept locally only
+tools/

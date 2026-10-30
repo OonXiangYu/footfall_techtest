@@ -1,7 +1,8 @@
-"""Tag detector on the body canvas: logistic regression on small tag-centred patches, slid over two
-shoulder-placed side windows. Scored with numpy only (the pipeline does not need scikit-learn)."""
+"""Tag model on the body canvas: logistic regression on small tag-centred patches, slid over two
+shoulder-placed side windows. Scored with numpy only (the pipeline does not need scikit-learn); trained by
+tools/train_tag_model.py. It ranks the review candidates; on its own it is not reliable enough to pick the
+staff member."""
 
-import json
 from pathlib import Path
 
 import cv2
@@ -10,12 +11,10 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 from pose import to_canvas
 
+TAG_SIZE = (14, 7)  # name tag size in the video (px), measured on labelled crops
 PATCH_SIZE = (24, 12)  # (width, height) px of a patch; covers 2 x the tag size, tag in the middle
 STEP = 2  # px between search positions (at patch resolution)
 FEATURES = ["abs", "pixels"]
-LLR_BINS = np.linspace(0, 1, 11)
-LLR_CLIP = 2.0
-EVIDENCE_VARIANTS = ["mixture", "visible", "visible_positive"]
 
 
 def patch_scale(tag_units):
@@ -84,28 +83,6 @@ def best_position(model, canvas, width):
     return best
 
 
-def llr(model, score, variant=None):
-    """Clipped log-likelihood ratio of a score from the stored per-bin tables (see llr_tables)."""
-    variant = variant or model.get("evidence_variant") or "mixture"
-    k = np.clip(np.digitize(score, LLR_BINS) - 1, 0, len(LLR_BINS) - 2)
-    return float(np.clip(model[f"llr_{variant}"][k], -LLR_CLIP, LLR_CLIP))
-
-
-def llr_tables(staff_y, staff_n, others, visible_share):
-    """Per score bin, add-one smoothed:
-    mixture:          log P(score | staff) / P(score | other), staff = visible_share x tag-visible
-                      frames + the rest tag-hidden frames (the tag is hidden most of the time);
-    visible:          log P(score | tag visible on staff) / P(score | other);
-    visible_positive: the same, but never below 0 (frames that do not look like a tag add nothing)."""
-    def density(scores):
-        counts, _ = np.histogram(scores, LLR_BINS)
-        return (counts + 1) / (counts.sum() + len(counts))
-    other = density(others)
-    visible = np.log(density(staff_y) / other)
-    mixture = np.log((visible_share * density(staff_y) + (1 - visible_share) * density(staff_n)) / other)
-    return {"llr_mixture": mixture, "llr_visible": visible, "llr_visible_positive": np.maximum(visible, 0)}
-
-
 def save_model(path, **fields):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, **fields)
@@ -114,8 +91,4 @@ def save_model(path, **fields):
 def load_model(path):
     model = dict(np.load(path))
     model["feature"] = str(model["feature"])
-    evidence = Path(path).with_suffix(".json")  # evidence variant and chain threshold, from eval_chain_evidence.py
-    chosen = json.loads(evidence.read_text()) if evidence.exists() else {}
-    model["chain_threshold"] = chosen.get("threshold")
-    model["evidence_variant"] = chosen.get("variant", "mixture")
     return model

@@ -1,14 +1,17 @@
-"""End-to-end staff detection: detect -> track -> link tracklets -> tag evidence -> per-frame output.
+"""End-to-end staff detection: detect -> track -> link tracklets -> staff chains -> per-frame output.
 
-    python src/staff_detect.py --video data/sample.mp4 --out outputs/run [--tag auto|oracle]
+    python src/staff_detect.py --video data/sample.mp4 --out outputs/run [--tag review|oracle]
+
+review (default): a person confirms the staff among candidates ranked by the tag model (semi-automatic);
+oracle: the staff chains come from the hand tag labels (data/tag_gt.csv), as a reference.
 """
 
 import argparse
 import csv
+import itertools
 import json
 import time
 from collections import Counter, defaultdict
-import itertools
 from pathlib import Path
 
 import cv2
@@ -20,8 +23,8 @@ import numpy as np
 from tqdm import tqdm
 from ultralytics import YOLO
 
-from crops import box_chest_point
 from appearance import load_or_compute_appearance, match_poses, similarity, track_ends
+from crops import box_chest_point
 from detections import choose_view, detect_people, duplicate_rows, keep_rows, rows_per_frame
 from fisheye import ANGLE_STEPS, box_outline, circle_for, owning_box, to_original_point, to_panorama_point
 from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, LONG_DISTANCE, LONG_GAP, MAX_LINK_DIST,
@@ -29,11 +32,10 @@ from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, LONG_DISTANC
 from pose import POSE_WEIGHTS, body_canvas, body_frame, keypoints_to_original, run_pose
 from review import (CONFIRM_WINDOW, EXPAND_SIMILARITY, PER_PAGE, candidates, load_confirmed, review,
                     save_confirmed, staff_from_clicks)
-from tag_crops import interpolate_chest
-from tag_model import best_position, llr, load_model
+from labels import DATA, ROOT, interpolate_chest, load_tag_labels
+from tag_model import best_position, load_model
 from tracker import Tracker
 
-ROOT = Path(__file__).resolve().parent.parent
 PROBE_FRAMES = 50
 STAFF_COLOR = (0, 200, 0)
 OTHER_COLOR = (170, 170, 170)
@@ -45,9 +47,9 @@ def parse_args(argv=None):
     parser.add_argument("--video", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--unwarp", choices=["auto", "on", "off"], default="auto")
-    parser.add_argument("--tag", choices=["auto", "oracle", "review"], default="auto",
-                        help="auto: tag detector; oracle: hand tag labels; review: a human confirms the staff "
-                             "among ranked candidates (semi-automatic)")
+    parser.add_argument("--tag", choices=["review", "oracle"], default="review",
+                        help="review: a person confirms the staff among ranked candidates (semi-automatic); "
+                             "oracle: the hand tag labels (--tag-labels), as a reference")
     parser.add_argument("--confirmed", help="--tag review: start the review page from these confirmations "
                                             "(with --no-review: use them as they are, without the page)")
     parser.add_argument("--no-review", dest="review", action="store_false",
@@ -67,16 +69,10 @@ def parse_args(argv=None):
     parser.add_argument("--confirm-window", type=float, default=CONFIRM_WINDOW,
                         help="--tag review --confirm-scope window: seconds either side of the click")
     parser.add_argument("--tag-labels", help="tag_gt.csv (y/n/u per frame), required for --tag oracle")
-    parser.add_argument("--gt", default=str(ROOT / "data" / "gt.csv"),
+    parser.add_argument("--gt", default=str(DATA / "gt.csv"),
                         help="hand-labelled chest points; --tag oracle uses them to locate the tag")
     parser.add_argument("--tag-model", default=str(ROOT / "models" / "tag_classifier.npz"),
-                        help="--tag auto: tag detector from tag_classifier.py")
-    parser.add_argument("--tag-crossfit", action="store_true",
-                        help="--tag auto, for evaluating on the labelled video: score each half of the video with "
-                             "the model trained on the other half (models/tag_classifier_fold0/1.npz)")
-    parser.add_argument("--evidence-threshold", type=float, default=None,
-                        help="--tag auto: chain evidence (summed log-likelihood ratio) needed for staff "
-                             "(default: chosen by eval_chain_evidence.py, else 0)")
+                        help="--tag review: tag model that ranks the candidates (tools/train_tag_model.py)")
     parser.add_argument("--imgsz", type=int, default=1440)
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--max-dist", type=float, default=0.05,
@@ -99,7 +95,7 @@ def parse_args(argv=None):
                         help="still-person linking: max distance, fraction of the radius")
     parser.add_argument("--link-ratio", type=float, default=LINK_RATIO,
                         help="ratio test for links: only link when clearly the best option; 0 turns it off")
-    parser.add_argument("--tag-every", type=int, default=5, help="--tag auto: score tags every N frames")
+    parser.add_argument("--tag-every", type=int, default=5, help="--tag review: score tags every N frames to rank the candidates")
     parser.add_argument("--max-hold", type=float, default=0.5,
                         help="seconds a staff position may be interpolated without a detection; longer gaps are "
                              "reported as not present")
@@ -214,52 +210,24 @@ def link(detections, track_ids, max_gap, speed, margin, max_distance, ratio=None
 
 # ---- stage 4: tag evidence -----------------------------------------------------------------------
 
-def tag_models(args):
-    """[(model, frames it scores)]: the all-data model, or with --tag-crossfit each fold model on the
-    half it was NOT trained on."""
-    if not args.tag_crossfit:
-        return [(load_model(args.tag_model), lambda f: True)]
-    folds = [load_model(ROOT / "models" / f"tag_classifier_fold{k}.npz") for k in (0, 1)]
-    split = int(folds[0]["split"])
-    return [(folds[0], lambda f: f >= split), (folds[1], lambda f: f < split)]  # fold0 trained on the first half
-
-
-def score_tags(args, detections, frame_rows, models):
+def score_tags(args, detections, frame_rows, model):
     """Every tag_every frames: pose on the panorama, matched to the detector's boxes; each matched person's
-    best tag position in the two side windows is scored. Returns per detection row the score and its
-    log-likelihood ratio (NaN where not scored)."""
+    best tag position in the two side windows is scored. Returns the score per detection row (NaN where not
+    scored)."""
     pose_model = YOLO(str(ROOT / POSE_WEIGHTS))
     center, radius = tuple(detections["center"]), float(detections["radius"])
     scores = np.full(len(detections["frame"]), np.nan)
-    ratios = np.full(len(detections["frame"]), np.nan)
     for index, frame in tqdm(read_video(args.video), total=len(frame_rows), desc="Tag scoring"):
         if index % args.tag_every or index >= len(frame_rows):
             continue
-        model = next(m for m, scores_frame in models if scores_frame(index))
         rows = frame_rows[index]
         pose_boxes, keypoints, confs = run_pose(pose_model, frame, center, radius)
         for det, pose in match_poses(detections["box"][rows], pose_boxes).items():
             body = body_frame(keypoints_to_original(keypoints[pose], center, radius), confs[pose])
             if body is None:
                 continue
-            score, _ = best_position(model, body_canvas(frame, body), body[3])
-            scores[rows[det]], ratios[rows[det]] = score, llr(model, score)
-    return scores, ratios
-
-
-def chain_evidence(chains, ratios):
-    """Per chain: (summed log-likelihood ratio, frames scored)."""
-    evidence, scored = Counter(), Counter()
-    for chain, ratio in zip(chains, ratios):
-        if not np.isnan(ratio):
-            evidence[int(chain)] += float(ratio)
-            scored[int(chain)] += 1
-    return evidence, scored
-
-
-def load_tag_labels(path):
-    with open(path, newline="") as f:
-        return {int(row["frame"]): row["label"] for row in csv.DictReader(f)}
+            scores[rows[det]], _ = best_position(model, body_canvas(frame, body), body[3])
+    return scores
 
 
 def oracle_tag_hits(args, detections, frame_rows, chains):
@@ -481,7 +449,7 @@ def review_scores(args, out, state):
         cached = np.load(path)
         if str(cached["key"]) == key:
             return cached["score"]
-    scores, _ = score_tags(args, state["detections"], state["frame_rows"], [(load_model(model_path), lambda f: True)])
+    scores = score_tags(args, state["detections"], state["frame_rows"], load_model(model_path))
     np.savez(path, key=key, score=scores)
     return scores
 
@@ -544,27 +512,7 @@ def main():
     keep, all_rows, frame_count = state["keep"], state["all_rows"], state["frame_count"]
 
     start = time.perf_counter()
-    scored, extra = Counter(), {}
-    if args.tag == "auto":
-        models = tag_models(args)
-        threshold = args.evidence_threshold
-        if threshold is None:
-            known = [m["chain_threshold"] for m, _ in models if m["chain_threshold"] is not None]
-            threshold = float(np.mean(known)) if known else 0.0
-        print(f"   tag detector: {'cross-fitted fold models' if args.tag_crossfit else args.tag_model}; "
-              f"staff chain needs evidence >= {threshold:.2f}")
-        scores, ratios = score_tags(args, detections, frame_rows, models)
-        hits, scored = chain_evidence(chains, ratios)  # "hits" = evidence: the strongest chain wins a frame
-        staff_chains = {chain for chain, value in hits.items() if value >= threshold}
-        tag_rows = np.full(all_rows, np.nan)
-        tag_rows[keep] = scores
-        llr_rows = np.full(all_rows, np.nan)
-        llr_rows[keep] = ratios
-        np.savez(out / "tag_scores.npz", score=tag_rows, llr=llr_rows, crossfit=args.tag_crossfit,
-                 split=int(models[0][0]["split"]))
-        extra = {"evidence": np.array([hits[c] for c in hits], float),
-                 "scored_count": np.array([scored[c] for c in hits], int)}
-    elif args.tag == "review":
+    if args.tag == "review":
         chains, staff_chains, hits = review_staff(args, out, fps, state)
     else:
         hits = oracle_tag_hits(args, detections, frame_rows, chains)
@@ -576,11 +524,8 @@ def main():
     chain_per_row[keep] = chains
     np.savez(out / "chains.npz", chain=chain_per_row, hit_chain=np.array(list(hits), int),
              hit_count=np.array([round(v) for v in hits.values()], int),
-             staff_chain=np.array(sorted(staff_chains), int), **extra)
-    if args.tag == "auto":
-        top = ", ".join(f"{c}:{v:+.1f}/{scored[c]}" for c, v in hits.most_common(8))
-        print(f"4. tag evidence (auto): {len(staff_chains)} staff chain(s); top chains (id:evidence/scored) {top}")
-    elif args.tag == "review":
+             staff_chain=np.array(sorted(staff_chains), int))
+    if args.tag == "review":
         print(f"4. staff (review): {sum(v == 2 for v in hits.values())} confirmed + "
               f"{sum(v == 1 for v in hits.values())} added chain(s)")
     else:

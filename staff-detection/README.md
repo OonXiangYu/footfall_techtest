@@ -4,6 +4,11 @@ Finds the staff member (the person wearing the name tag) in an overhead fisheye 
 for every frame, whether they are present and where (`staff.csv`), plus an annotated video and a
 presence timeline.
 
+**Not included:** the sample video and the task brief are company material and are not in this
+repository. The hand labels (`data/*.csv`), the trained tag model, the confirmations and the
+results below all come from that video. To reproduce them you need the video; without it you can
+run the pipeline on your own footage (see below).
+
 ## Setup
 
 Python 3.11, from the `staff-detection/` folder:
@@ -17,6 +22,57 @@ python -m venv .venv
 The last line downloads the detector and pose weights into this folder. Commands below use
 `.venv\Scripts\python.exe`; on macOS / Linux use `.venv/bin/python`.
 
+## Run on your own video
+
+The pipeline is built for a ceiling-mounted fisheye camera looking straight down, with one staff
+member wearing a name tag. Any video OpenCV can read works:
+
+```
+.venv\Scripts\python.exe src\staff_detect.py --video path\to\your_video.mp4 --out outputs\my_run
+```
+
+Detection, tracking and linking run on their own (about 4 minutes for the 54 s sample video on
+the development machine). Then the review page opens and you confirm the staff member among the ranked candidates (see
+[Semi-automatic mode](#semi-automatic-mode)). The results go to `outputs\my_run`.
+
+- The fisheye circle is found automatically. If none is found, the frame centre is used.
+  `--unwarp auto` (default) checks the first frames and uses the panorama only if more people
+  are detected on it, so ordinary (non-fisheye) footage also runs, though only fisheye footage
+  was tested.
+- The tag model was trained on the sample video only and has not been tested on other footage;
+  its ranking may be weaker there, so you may need to look through more pages.
+- The `eval\` scripts need hand labels in the format of `data\gt.csv` for your video. The
+  pipeline itself does not need them.
+
+## Reproduce the final result (needs the sample video)
+
+Put the sample video at `data\sample.mp4`. The confirmations from the final review are in
+`examples\sample_confirmed.json`, so the final run can be repeated without the review page:
+
+```
+.venv\Scripts\python.exe src\staff_detect.py --video data\sample.mp4 --out outputs\final --confirmed examples\sample_confirmed.json --no-review
+```
+
+This writes `staff.csv`, `annotated.mp4`, `timeline.png` and the caches into `outputs\final`.
+`staff.csv` is identical to `results\staff.csv`.
+
+## How it works
+
+1. **Detection.** The fisheye frame is unwarped into a panorama (one column per 0.25 degree,
+   with the left edge repeated past the right edge so that people on the seam are seen whole).
+   YOLOv8n then runs on the panorama (imgsz 1440, conf 0.25). On the original frame the detector
+   finds the staff member on 27% of the labelled frames; on the panorama it finds them on 86%
+   (`eval\eval_detection.py`).
+2. **Tracking.** A point tracker with a tight gate (0.05 of the fisheye radius per frame)
+   follows each person. It breaks tracks rather than swapping people.
+3. **Linking.** Track pieces are joined into chains when one ends where another starts. A link
+   needs a clear best candidate (ratio test). Torso colour rescues ambiguous links and joins a
+   person who sat still while undetected.
+4. **Staff identification (semi-automatic).** A tag model ranks the chains. A person confirms the
+   staff member on a review page, and chains whose colours match a confirmed one are added.
+5. **Output.** A path through the staff chains (one per frame, with a penalty for switching)
+   gives the point and box per frame. Gaps of up to 0.5 s are interpolated.
+
 ## Semi-automatic mode
 
 A single video is not enough data for the automatic tag detector to work across outfits, so in this
@@ -27,7 +83,7 @@ mode a person confirms the staff member once, on a review page, and everything e
    person outlined). The window is scaled to fit the screen:
 
    ```
-   .venv\Scripts\python.exe src\staff_detect.py --video data\sample.mp4 --out outputs\run_review --tag review
+   .venv\Scripts\python.exe src\staff_detect.py --video data\sample.mp4 --out outputs\run_review
    ```
 
    - Click a candidate to see its whole track: 5 frames spread from its start to its end, each with
@@ -47,7 +103,7 @@ mode a person confirms the staff member once, on a review page, and everything e
    `--no-review` to reuse them without the page, e.g. after changing settings:
 
    ```
-   .venv\Scripts\python.exe src\staff_detect.py --video data\sample.mp4 --out outputs\run_review --tag review --confirmed outputs\run_review\confirmed.json
+   .venv\Scripts\python.exe src\staff_detect.py --video data\sample.mp4 --out outputs\run_review --confirmed outputs\run_review\confirmed.json
    ```
 
    Confirmations are stored by detection, with their scope (whole track or 5 s window), so they stay
@@ -63,32 +119,86 @@ mode a person confirms the staff member once, on a review page, and everything e
      time with a staff track, and the staff member could have walked between them.
      Higher is stricter.
    - `--no-expand`: only the confirmed tracks count as staff.
+   - `--debug`: draw every chain in `annotated.mp4`, not just the staff member.
+   - `--tag oracle`: take the staff chains from the hand tag labels instead of a review (a
+     reference for the evaluation).
 
-4. **Check against the hand labels** (for this sample video, which has `data\gt.csv`):
+## Results on the sample video
 
-   ```
-   .venv\Scripts\python.exe src\eval_pipeline.py outputs\run_review
-   .venv\Scripts\python.exe src\eval_review.py outputs\run_review
-   ```
+The final run used 44 confirmations, all whole-track. They are listed in
+`examples\sample_confirmed.json`. More detail is in `results\summary.md`.
 
-   `eval_pipeline.py` scores `staff.csv`. `eval_review.py` simulates users with the labels: how
-   many of the top candidates are the staff member; the results when every staff candidate on
-   page 1 (or pages 1-2) is confirmed, and with one confirmation per outfit; for both confirm
-   scopes, with and without expansion; and the purity of the tracks expansion adds.
+| | |
+|---|---|
+| position hits (within 0.10 R = 48 px of the labelled chest point) | **50 of 55** labelled frames |
+| median distance on the labelled frames | **15.6 px** |
+| frames marked present | 1260 of 1337 (the staff member is in every frame; precision 1.00, recall 0.94) |
+| frames on the wrong person (far from the GT, another chain on it) | 56 |
+| frames where the point stands still while far from the GT | 6 |
+| frames claimed by two staff chains at once | 7 |
 
-### Results on the sample video
+The per-frame figures use the hand-labelled chest point, interpolated between the labelled
+frames (about one per second).
 
-Simulated with the hand labels (`eval_review.py`), whole-track confirmation:
+- `results\staff.csv`: `frame, present, x, y, chain` for every frame (x, y in original pixels).
+- `results\timeline.png`: presence over time.
+- `results\error_timeline.png`: distance to the labelled point per frame.
+- `results\summary.md`: the numbers in one place.
+
+The annotated video and the figures showing video frames are not published, because they show
+the people in the sample video. The commands above recreate them from the video.
+
+Simulated users (`eval\eval_review.py`, whole-track confirmation) show how much a short review gives:
 
 | | confirmations | position hits (of 55 labelled frames) | median error | frames with the staff marked | marked frames really the staff |
 |---|---|---|---|---|---|
-| confirm every staff candidate on page 1 (8 shown) | 5 | 9 | 16 px | 365 | 100% |
-| confirm every staff candidate on pages 1-2 (16 shown) | 7 | 13 | 44 px | 657 | 82% |
-| one confirmation per outfit, 2 clicks, + expansion | 2 | 11 | 14 px | 329 | 100% |
-| oracle (hand tag labels on every 5th frame) | - | 21 | 20 px | 687 | - |
+| confirm every staff candidate on page 1 (8 shown) | 5 | 11 | 12 px | 310 | 100% |
+| confirm every staff candidate on pages 1-2 (16 shown) | 6 | 11 | 14 px | 399 | 79% |
+| one confirmation per outfit, 2 clicks, + expansion | 2 | 11 | 12 px | 285 | 100% |
 
 A hit is a predicted point within 0.10 of the fisheye radius (48 px) of the labelled chest point.
-4 of the top 5 review candidates were the staff member (5 of the 8 on page 1). Confirming more
-candidates covers more of the video, but some tracks switch to another person for part of their
-length, so purity drops below 100%. The staff member is hard to find while seated (the tag is
-not visible), so the seated stretch at the start is rarely among the candidates.
+4 of the top 5 review candidates were the staff member (5 of the 8 on page 1). The tag is visible
+on only about 14% of the staff frames, so a few clicks cover only part of the video; the final run
+needed 44.
+
+## Evaluation
+
+All of these compare against the hand labels in `data\`, so they need the sample video:
+
+```
+.venv\Scripts\python.exe eval\eval_run.py outputs\final        # hits, presence, per-chain and per-frame diagnostics
+.venv\Scripts\python.exe eval\eval_review.py outputs\final     # simulated review users
+.venv\Scripts\python.exe eval\eval_linking.py outputs\final    # tracker gate and linking settings (purity)
+.venv\Scripts\python.exe eval\eval_detection.py                # original frame vs panorama
+```
+
+`eval_detection.py` prints:
+
+| view | hits of 55 | boxes / frame |
+|---|---|---|
+| original frame | 15 (27%) | 2.8 |
+| panorama | 47 (86%) | 15.7 |
+
+The tag model's per-frame AUC on the held-out half of the video is 0.86 and 0.74 (tag visible vs
+other people). That is good enough to rank review candidates, not to pick the staff member
+automatically.
+
+## Repository layout
+
+```
+src/        the pipeline: staff_detect.py (entry point), fisheye, detections, tracker, linking,
+            appearance, pose, crops, tag_model, review, labels (paths and label readers)
+eval/       evaluation scripts (above)
+data/       hand labels: gt.csv (chest point ~1 per second), tag_gt.csv / tag_gt_dense.csv
+            (tag visibility), tag_pos.csv (tag centres) for the sample video
+models/     tag_classifier.npz (the tag model that ranks review candidates)
+examples/   sample_confirmed.json (the final review's confirmations)
+results/    staff.csv, plots and summary.md of the final run
+outputs/    run folders (not in git)
+```
+
+The tools used to make the hand labels and to train the tag model are not included.
+
+The earlier experiments are kept in git history under the tag `experiments-archive`
+(`git checkout experiments-archive`). They include the fully automatic tag detection (`--tag auto`),
+template matching, the ByteTrack comparison and the detector settings sweep.

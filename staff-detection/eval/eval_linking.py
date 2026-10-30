@@ -1,18 +1,27 @@
-"""Evaluate our own tracker (src/tracker.py) on the cached detections in outputs/detections.npz."""
+"""Evaluate the tracker gate and the tracklet-linking settings on a staff_detect.py run's detections.
+
+    python eval/eval_linking.py outputs/run
+
+Reads <run>/detections.npz and <run>/appearance.npz. A track (or chain) is "the staff" at a labelled
+frame when its box owns the GT chest point; purity = labelled frames where each staff track is on the
+GT point, over the labelled frames it exists on (a swap onto someone else lowers it, a break does not).
+"""
 
 import argparse
-from collections import Counter, deque
+import sys
+from collections import Counter
+from pathlib import Path
 
-import cv2
 import numpy as np
 
-from detections import duplicate_rows, keep_rows, rows_per_frame
-from eval_detection import ROOT, load_gt_points
-from fisheye import ANGLE_STEPS, to_panorama_point
-from eval_tracking import count_id_changes, id_color, staff_track_id
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from appearance import similarity, track_ends
+from detections import duplicate_rows, keep_rows, rows_per_frame
+from fisheye import ANGLE_STEPS, owning_box, to_panorama_point
+from labels import DATA, load_gt_points
 from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, LONG_DISTANCE, LONG_GAP, MAX_LINK_DIST,
                      chain_ids, link_tracks, track_summaries)
+from staff_detect import video_info
 from tracker import Tracker
 
 MAX_MISSED_SECONDS = 1.0
@@ -24,7 +33,6 @@ SETTINGS = [  # (name, max_dist as a fraction of the radius, use velocity)
     ("dist0.20", 0.20, True),
     (f"dist{DEFAULT_GATE:.2f}_novel", DEFAULT_GATE, False),
 ]
-APPEARANCE = ROOT / "outputs" / "appearance.npz"  # torso histograms per detection (appearance.py)
 LINK_SETTINGS = [  # (name, max gap s, ratio or None, appearance rescue, still-person gap s or None, drop duplicates)
     ("gap1.5s", 1.5, None, False, None, False),
     ("ratio0.5", 1.5, 0.5, False, None, False),
@@ -36,16 +44,19 @@ LINK_SETTINGS = [  # (name, max gap s, ratio or None, appearance rescue, still-p
     ("default + dedupe + app", LINK_GAP, LINK_RATIO, True, None, True),
     (f"dedupe + app + still {LONG_GAP:g}s", LINK_GAP, LINK_RATIO, True, LONG_GAP, True),
 ]
-COMPARE_RANGE = (300, 600)  # same frames as the ByteTrack run
-TRAIL_LENGTH = 15
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--video", default=str(ROOT / "data" / "sample.mp4"))
-    parser.add_argument("--gt", default=str(ROOT / "data" / "gt.csv"))
-    parser.add_argument("--detections", default=str(ROOT / "outputs" / "detections.npz"))
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("run", help="output folder of staff_detect.py (its detections.npz and appearance.npz)")
+    parser.add_argument("--video", default=str(DATA / "sample.mp4"))
+    parser.add_argument("--gt", default=str(DATA / "gt.csv"))
     return parser.parse_args()
+
+
+def count_id_changes(staff_ids):
+    known = [i for i in staff_ids if i is not None]
+    return sum(a != b for a, b in zip(known, known[1:]))
 
 
 # median and max px per frame between consecutive labelled points
@@ -71,8 +82,8 @@ def staff_ids_at_gt(detections, frame_rows, ids, gt_points):
     for frame, (x, y) in sorted(gt_points.items()):
         rows = frame_rows[frame]
         point = to_panorama_point(x, y, center, radius)
-        staff[frame] = None if point is None else staff_track_id(
-            point, detections["pano_box"][rows], ids[rows].tolist(), ANGLE_STEPS)
+        owner = None if point is None else owning_box(point, detections["box"][rows], ANGLE_STEPS)
+        staff[frame] = None if owner is None else int(ids[rows][owner])
     return staff
 
 
@@ -92,15 +103,13 @@ def evaluate(name, detections, frame_rows, gt_points, max_dist_fraction, use_vel
     max_missed = round(MAX_MISSED_SECONDS * float(detections["fps"]))
     ids = run_tracker(detections, frame_rows, max_dist, max_missed, use_velocity)
     staff = staff_ids_at_gt(detections, frame_rows, ids, gt_points)
-    in_range = [staff[f] for f in staff if COMPARE_RANGE[0] <= f <= COMPARE_RANGE[1]]
     purity = track_purity(staff, ids, frame_rows)
     on_point, total = (sum(p[i] for p in purity.values()) for i in (0, 1))
     return {"name": name, "ids": ids, "staff": staff, "purity": purity,
             "purity_rate": on_point / total if total else float("nan"),
             "unique_ids": len(set(ids.tolist())),
             "median_length": float(np.median(list(Counter(ids.tolist()).values()))),
-            "changes": count_id_changes(list(staff.values())),
-            "changes_in_range": count_id_changes(in_range)}
+            "changes": count_id_changes(list(staff.values()))}
 
 
 # tracker (DEFAULT_GATE) + linking; the chain that owns the GT point is the staff chain at that frame
@@ -147,13 +156,13 @@ def print_link_table(rows, labelled):
 
 
 def print_table(rows):
-    print(f"\n{'setting':<18}{'purity':>8}{'impure IDs':>12}{'ID changes':>12}{'changes 300-600':>17}"
-          f"{'unique IDs':>12}{'median len':>12}")
+    print("\nTracker gate (max_dist); staff ID = track owning the GT point")
+    print(f"{'setting':<18}{'purity':>8}{'impure IDs':>12}{'ID changes':>12}{'unique IDs':>12}{'median len':>12}")
     for row in rows:
         impure = sum(on < total for on, total in row["purity"].values())
         impure_text = f"{impure}/{len(row['purity'])}"
         print(f"{row['name']:<18}{row['purity_rate']:>8.0%}{impure_text:>12}{row['changes']:>12}"
-              f"{row['changes_in_range']:>17}{row['unique_ids']:>12}{row['median_length']:>12.0f}")
+              f"{row['unique_ids']:>12}{row['median_length']:>12.0f}")
     for row in rows:
         sequence = " ".join("-" if i is None else str(i) for i in row["staff"].values())
         print(f"\n{row['name']} staff IDs at GT frames:\n  {sequence}")
@@ -161,51 +170,11 @@ def print_table(rows):
         print(f"  also on someone else (id:on GT/labelled frames present): {' '.join(impure) or 'none'}")
 
 
-def draw_tracks(frame, points, ids, trails, staff_id, gt_point, index):
-    image = frame.copy()
-    for track_id, trail in trails.items():
-        if len(trail) > 1:
-            cv2.polylines(image, [np.array(trail, np.int32)], False, id_color(track_id), 1, cv2.LINE_AA)
-    for (x, y), track_id in zip(points.astype(int), ids):
-        is_staff = track_id == staff_id
-        cv2.circle(image, (x, y), 9 if is_staff else 4, id_color(track_id), -1)
-        if is_staff:
-            cv2.circle(image, (x, y), 11, (255, 255, 255), 2)
-        cv2.putText(image, str(track_id), (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8 if is_staff else 0.45, id_color(track_id), 2 if is_staff else 1, cv2.LINE_AA)
-    if gt_point is not None:
-        cv2.drawMarker(image, gt_point, (0, 0, 255), cv2.MARKER_CROSS, 22, 2)
-    header = f"frame {index}  staff ID {staff_id}"
-    cv2.putText(image, header, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4, cv2.LINE_AA)
-    cv2.putText(image, header, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
-    return image
-
-
-# original frames with each track's point, ID and trail; the staff track (as of the last GT frame) is bigger
-def save_video(path, video, detections, frame_rows, result, gt_points):
-    cap = cv2.VideoCapture(video)
-    writer, trails, staff_id = None, {}, None
-    for index, rows in enumerate(frame_rows):
-        ok, frame = cap.read()
-        if not ok:
-            break
-        points, ids = detections["point"][rows], result["ids"][rows].tolist()
-        for point, track_id in zip(points, ids):
-            trails.setdefault(track_id, deque(maxlen=TRAIL_LENGTH)).append(point)
-        staff_id = result["staff"].get(index, staff_id)
-        visible_trails = {i: trails[i] for i in ids}
-        image = draw_tracks(frame, points, ids, visible_trails, staff_id, gt_points.get(index), index)
-        if writer is None:
-            h, w = image.shape[:2]
-            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), float(detections["fps"]), (w, h))
-        writer.write(image)
-    cap.release()
-    writer.release()
-
-
 def main():
     args = parse_args()
-    detections = dict(np.load(args.detections))
+    run = Path(args.run)
+    detections = dict(np.load(run / "detections.npz"))
+    detections["fps"], _ = video_info(args.video)
     gt_points = load_gt_points(args.gt)
     frame_rows = rows_per_frame(detections)
 
@@ -219,22 +188,16 @@ def main():
             for name, fraction, use_velocity in SETTINGS]
     print_table(rows)
 
-    hists = np.load(APPEARANCE)["hists"] if APPEARANCE.exists() else None
+    appearance = run / "appearance.npz"
+    hists = np.load(appearance)["hists"] if appearance.exists() else None
     if hists is None:
-        print(f"\n(no {APPEARANCE.name}: appearance settings skipped; run appearance.py's cache first)")
-    # duplicate_rows needs "box"; this cache calls the panorama boxes "pano_box"
-    detections.setdefault("box", detections["pano_box"])
+        print(f"\n(no {appearance}: appearance settings skipped)")
     link_rows = [evaluate_linking(name, detections, frame_rows, gt_points, gap, ratio,
                                   hists if use_appearance else None, long_gap, dedupe)
                  for name, gap, ratio, use_appearance, long_gap, dedupe in LINK_SETTINGS
                  if hists is not None or not use_appearance]
     print_link_table(link_rows, len(gt_points))
 
-    # purity first: few ID changes can also mean the track swapped onto someone else
-    best = max(rows, key=lambda r: (r["purity_rate"], -r["changes"]))
-    path = ROOT / "outputs" / f"own_track_{best['name']}.mp4"
-    save_video(path, args.video, detections, frame_rows, best, gt_points)
-    print(f"\nBest setting: {best['name']} -> {path}")
 
 
 if __name__ == "__main__":
