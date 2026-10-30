@@ -17,15 +17,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
 from ultralytics import YOLO
 
 from crops import box_chest_point
-from detections import choose_view, detect_people, rows_per_frame
+from appearance import load_or_compute_appearance, match_poses, similarity, track_ends
+from detections import choose_view, detect_people, duplicate_rows, keep_rows, rows_per_frame
 from fisheye import ANGLE_STEPS, circle_for, owning_box, to_original_point, to_panorama_point
-from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, MAX_LINK_DIST, chain_ids, link_tracks,
-                     track_summaries)
+from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, LONG_DISTANCE, LONG_GAP, MAX_LINK_DIST,
+                     chain_ids, link_tracks, track_summaries)
 from pose import POSE_WEIGHTS, body_canvas, body_frame, keypoints_to_original, run_pose
 from tag_crops import interpolate_chest
 from tag_model import load_tag_model, tag_probability
@@ -60,6 +60,14 @@ def parse_args():
                         help="extra link distance, fraction of the radius")
     parser.add_argument("--max-link-dist", type=float, default=MAX_LINK_DIST,
                         help="cap on the link distance, fraction of the radius")
+    parser.add_argument("--keep-duplicates", action="store_true",
+                        help="keep a box that lies inside another box of similar width (dropped by default)")
+    parser.add_argument("--no-link-appearance", dest="link_appearance", action="store_false",
+                        help="link without torso appearance (no ratio-test rescue, no still-person pass)")
+    parser.add_argument("--long-gap", type=float, default=LONG_GAP,
+                        help="still-person linking: max seconds, for close and similar-looking track ends")
+    parser.add_argument("--long-distance", type=float, default=LONG_DISTANCE,
+                        help="still-person linking: max distance, fraction of the radius")
     parser.add_argument("--link-ratio", type=float, default=LINK_RATIO,
                         help="ratio test for links: only link when clearly the best option; 0 turns it off")
     parser.add_argument("--tag-threshold", type=float, default=None,
@@ -158,35 +166,23 @@ def track(detections, frame_rows, max_dist, max_missed):
     return ids
 
 
-def link(detections, track_ids, max_gap, speed, margin, max_distance, ratio=None):
+def link(detections, track_ids, max_gap, speed, margin, max_distance, ratio=None, hists=None,
+         long_gap=None, long_distance=None):
     summaries = track_summaries(detections["frame"], detections["point"], track_ids)
-    successor = link_tracks(summaries, max_gap, speed, margin, max_distance, ratio)
+    appearance = None
+    if hists is not None:
+        ends = track_ends(detections["frame"], track_ids, hists)
+
+        def end_to_start(a, b):  # similarity of a's end and b's start
+            return similarity(ends[a][1], ends[b][0])
+        appearance = end_to_start
+    successor = link_tracks(summaries, max_gap, speed, margin, max_distance, ratio, appearance,
+                            long_gap if hists is not None else None, long_distance)
     chains = chain_ids(summaries, successor)
     return np.array([chains[t] for t in track_ids], int), len(summaries), len(successor)
 
 
 # ---- stage 4: tag evidence -----------------------------------------------------------------------
-
-POSE_MATCH_IOU = 0.3  # a pose box belongs to a detector box if they overlap at least this much
-
-
-def box_iou(a, b):
-    width = min(a[2], b[2]) - max(a[0], b[0])
-    height = min(a[3], b[3]) - max(a[1], b[1])
-    if width <= 0 or height <= 0:
-        return 0.0
-    inter = width * height
-    return inter / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
-
-
-def match_poses(det_boxes, pose_boxes):
-    """{detection index: pose index}, one-to-one by IoU (Hungarian), IoU >= POSE_MATCH_IOU."""
-    if len(det_boxes) == 0 or len(pose_boxes) == 0:
-        return {}
-    iou = np.array([[box_iou(d, p) for p in pose_boxes] for d in det_boxes])
-    rows, cols = linear_sum_assignment(-iou)
-    return {r: c for r, c in zip(rows, cols) if iou[r, c] >= POSE_MATCH_IOU}
-
 
 def auto_tag_hits(args, detections, frame_rows, chains, model, threshold):
     """Every tag_every frames: pose on the panorama, matched to the detector's boxes; each matched
@@ -341,6 +337,21 @@ def main():
     radius = float(detections["radius"])
     print(f"   view: {'panorama' if detections['use_pano'] else 'original frame'}, radius {radius:.0f} px")
     frame_rows = rows_per_frame(detections)
+    all_rows = len(detections["frame"])
+
+    hists = None
+    if args.link_appearance:
+        start = time.perf_counter()
+        hists, from_pose = load_or_compute_appearance(out / "appearance.npz", args.video, detections, frame_rows)
+        timings["appearance"] = time.perf_counter() - start
+        print(f"   appearance: torso colour histograms, {from_pose.mean():.0%} from the pose, rest from the chest crop")
+    keep = np.ones(all_rows, bool)
+    if not args.keep_duplicates:
+        keep = ~duplicate_rows(detections, frame_rows)
+        detections = keep_rows(detections, keep)
+        frame_rows = rows_per_frame(detections)
+        hists = hists[keep] if hists is not None else None
+        print(f"   duplicates: dropped {int((~keep).sum())} boxes lying inside another box of similar width")
 
     start = time.perf_counter()
     track_ids = track(detections, frame_rows, args.max_dist * radius, round(args.max_missed * fps))
@@ -354,7 +365,11 @@ def main():
           f"at the longest gap ({max_gap} frames) that is {min(speed * max_gap + margin, cap):.1f} px")
     ratio = args.link_ratio if args.link_ratio > 0 else None
     print(f"   link ratio test: {ratio or 'off'}")
-    chains, track_count, link_count = link(detections, track_ids, max_gap, speed, margin, cap, ratio)
+    if hists is not None:
+        print(f"   appearance linking: ratio-test rescue; still-person pass up to {args.long_gap:g} s "
+              f"within {args.long_distance * radius:.1f} px")
+    chains, track_count, link_count = link(detections, track_ids, max_gap, speed, margin, cap, ratio, hists,
+                                           round(args.long_gap * fps), args.long_distance * radius)
     timings["linking"] = time.perf_counter() - start
     print(f"3. linking: {link_count} links, {track_count} tracks -> {len(set(chains.tolist()))} chains")
 
@@ -375,7 +390,10 @@ def main():
     timings["tag evidence"] = time.perf_counter() - start
     # chain of every detection row plus the tag evidence, for per-chain evaluation
     extra = {"scored_count": np.array([scored[c] for c in hits], int)} if scored else {}
-    np.savez(out / "chains.npz", chain=chains, hit_chain=np.array(list(hits), int),
+    # one entry per row of detections.npz; -1 for dropped duplicates
+    chain_per_row = np.full(all_rows, -1, int)
+    chain_per_row[keep] = chains
+    np.savez(out / "chains.npz", chain=chain_per_row, hit_chain=np.array(list(hits), int),
              hit_count=np.array(list(hits.values()), int), staff_chain=np.array(sorted(staff_chains), int), **extra)
     top = ", ".join(f"{c}:{n}" + (f"/{scored[c]}" if scored else "") for c, n in hits.most_common(8))
     print(f"4. tag evidence ({args.tag}): {len(staff_chains)} staff chain(s) with >= {args.min_hits} hits; "

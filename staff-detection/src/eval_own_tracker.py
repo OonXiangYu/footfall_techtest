@@ -6,12 +6,13 @@ from collections import Counter, deque
 import cv2
 import numpy as np
 
-from detections import rows_per_frame
+from detections import duplicate_rows, keep_rows, rows_per_frame
 from eval_detection import ROOT, load_gt_points
 from fisheye import ANGLE_STEPS, to_panorama_point
 from eval_tracking import count_id_changes, id_color, staff_track_id
-from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, MAX_LINK_DIST, chain_ids, link_tracks,
-                     track_summaries)
+from appearance import similarity, track_ends
+from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, LONG_DISTANCE, LONG_GAP, MAX_LINK_DIST,
+                     chain_ids, link_tracks, track_summaries)
 from tracker import Tracker
 
 MAX_MISSED_SECONDS = 1.0
@@ -23,11 +24,17 @@ SETTINGS = [  # (name, max_dist as a fraction of the radius, use velocity)
     ("dist0.20", 0.20, True),
     (f"dist{DEFAULT_GATE:.2f}_novel", DEFAULT_GATE, False),
 ]
-LINK_SETTINGS = [  # (name, max gap in seconds, ratio test or None); tracker at DEFAULT_GATE
-    ("gap1.5s", 1.5, None),
-    ("ratio0.5", 1.5, 0.5),
-    ("gap4s", 4.0, None),
-    (f"default (r{LINK_RATIO}, {LINK_GAP:g}s)", LINK_GAP, LINK_RATIO),
+APPEARANCE = ROOT / "outputs" / "appearance.npz"  # torso histograms per detection (appearance.py)
+LINK_SETTINGS = [  # (name, max gap s, ratio or None, appearance rescue, still-person gap s or None, drop duplicates)
+    ("gap1.5s", 1.5, None, False, None, False),
+    ("ratio0.5", 1.5, 0.5, False, None, False),
+    ("gap4s", 4.0, None, False, None, False),
+    (f"default (r{LINK_RATIO}, {LINK_GAP:g}s)", LINK_GAP, LINK_RATIO, False, None, False),
+    ("default + appearance", LINK_GAP, LINK_RATIO, True, None, False),
+    (f"default + app + still {LONG_GAP:g}s", LINK_GAP, LINK_RATIO, True, LONG_GAP, False),
+    ("default + dedupe", LINK_GAP, LINK_RATIO, False, None, True),
+    ("default + dedupe + app", LINK_GAP, LINK_RATIO, True, None, True),
+    (f"dedupe + app + still {LONG_GAP:g}s", LINK_GAP, LINK_RATIO, True, LONG_GAP, True),
 ]
 COMPARE_RANGE = (300, 600)  # same frames as the ByteTrack run
 TRAIL_LENGTH = 15
@@ -97,12 +104,23 @@ def evaluate(name, detections, frame_rows, gt_points, max_dist_fraction, use_vel
 
 
 # tracker (DEFAULT_GATE) + linking; the chain that owns the GT point is the staff chain at that frame
-def evaluate_linking(name, detections, frame_rows, gt_points, max_gap_seconds, ratio):
+def evaluate_linking(name, detections, frame_rows, gt_points, max_gap_seconds, ratio, hists=None, long_gap=None,
+                     dedupe=False):
+    if dedupe:
+        keep = ~duplicate_rows(detections, frame_rows)
+        detections = keep_rows(detections, keep)
+        frame_rows = rows_per_frame(detections)
+        hists = hists[keep] if hists is not None else None
     radius, fps = float(detections["radius"]), float(detections["fps"])
     ids = run_tracker(detections, frame_rows, DEFAULT_GATE * radius, round(MAX_MISSED_SECONDS * fps), True)
     summaries = track_summaries(detections["frame"], detections["point"], ids)
+    appearance = None
+    if hists is not None:
+        ends = track_ends(detections["frame"], ids, hists)
+        appearance = lambda a, b: similarity(ends[a][1], ends[b][0])  # noqa: E731  a's end vs b's start
     successor = link_tracks(summaries, round(max_gap_seconds * fps), LINK_SPEED * radius,
-                            LINK_MARGIN * radius, MAX_LINK_DIST * radius, ratio)
+                            LINK_MARGIN * radius, MAX_LINK_DIST * radius, ratio, appearance,
+                            round(long_gap * fps) if long_gap else None, LONG_DISTANCE * radius)
     chain_of = chain_ids(summaries, successor)
     chains = np.array([chain_of[t] for t in ids], int)
     staff = staff_ids_at_gt(detections, frame_rows, chains, gt_points)
@@ -115,13 +133,13 @@ def evaluate_linking(name, detections, frame_rows, gt_points, max_gap_seconds, r
 
 def print_link_table(rows, labelled):
     print(f"\nLinking (tracker gate {DEFAULT_GATE}); staff chain = chain owning the GT point")
-    print(f"{'setting':<22}{'purity':>8}{'impure chains':>15}{'covered':>10}{'chain changes':>15}"
+    print(f"{'setting':<30}{'purity':>8}{'impure chains':>15}{'covered':>10}{'chain changes':>15}"
           f"{'links':>7}{'chains':>8}")
     for row in rows:
         impure = sum(on < total for on, total in row["purity"].values())
         impure_text = f"{impure}/{len(row['purity'])}"
         covered = f"{row['covered']}/{labelled}"
-        print(f"{row['name']:<22}{row['purity_rate']:>8.0%}{impure_text:>15}{covered:>10}{row['changes']:>15}"
+        print(f"{row['name']:<30}{row['purity_rate']:>8.0%}{impure_text:>15}{covered:>10}{row['changes']:>15}"
               f"{row['links']:>7}{row['chains']:>8}")
     for row in rows:
         impure = [f"{i}:{on}/{total}" for i, (on, total) in row["purity"].items() if on < total]
@@ -201,8 +219,15 @@ def main():
             for name, fraction, use_velocity in SETTINGS]
     print_table(rows)
 
-    link_rows = [evaluate_linking(name, detections, frame_rows, gt_points, gap, ratio)
-                 for name, gap, ratio in LINK_SETTINGS]
+    hists = np.load(APPEARANCE)["hists"] if APPEARANCE.exists() else None
+    if hists is None:
+        print(f"\n(no {APPEARANCE.name}: appearance settings skipped; run appearance.py's cache first)")
+    # duplicate_rows needs "box"; this cache calls the panorama boxes "pano_box"
+    detections.setdefault("box", detections["pano_box"])
+    link_rows = [evaluate_linking(name, detections, frame_rows, gt_points, gap, ratio,
+                                  hists if use_appearance else None, long_gap, dedupe)
+                 for name, gap, ratio, use_appearance, long_gap, dedupe in LINK_SETTINGS
+                 if hists is not None or not use_appearance]
     print_link_table(link_rows, len(gt_points))
 
     # purity first: few ID changes can also mean the track swapped onto someone else

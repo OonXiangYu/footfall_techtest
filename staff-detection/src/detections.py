@@ -56,6 +56,38 @@ def detect_people(model, frame, circle, use_pano, imgsz, conf):
     return boxes, confs[rows]
 
 
+DUPLICATE_INSIDE = 0.85  # a box this much inside another one (of the smaller box's area) ...
+DUPLICATE_WIDTH = 0.7  # ... and at least this similar in width is a second box on the same person
+
+
+def duplicate_rows(detections, frame_rows):
+    """Rows to drop: the smaller of two boxes on the same person (e.g. upper body + whole body of
+    someone seated), which would otherwise make two tracks swap the person between them."""
+    boxes, drop = detections["box"], np.zeros(len(detections["frame"]), bool)
+    for rows in frame_rows:
+        for i in rows:
+            for j in rows:
+                if i == j or drop[j]:
+                    continue
+                a, b = boxes[i], boxes[j]  # is a (the smaller) a duplicate inside b?
+                area_a, area_b = (a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])
+                if area_a > area_b:
+                    continue
+                inter = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
+                widths = sorted((a[2] - a[0], b[2] - b[0]))
+                if inter >= DUPLICATE_INSIDE * area_a and widths[0] >= DUPLICATE_WIDTH * widths[1]:
+                    drop[i] = True
+                    break
+    return drop
+
+
+def keep_rows(detections, keep):
+    """The detections with only the kept rows (per-row arrays filtered, the rest unchanged)."""
+    rows = len(detections["frame"])
+    return {k: (v[keep] if isinstance(v, np.ndarray) and v.ndim and len(v) == rows else v)
+            for k, v in detections.items()}
+
+
 # detection row indices for each frame (rows are stored in frame order)
 def rows_per_frame(detections):
     frame_of_row = detections["frame"]

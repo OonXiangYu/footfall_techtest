@@ -72,18 +72,29 @@ def from_body(point, frame):
     return origin + width * (point[0] * x_axis + point[1] * y_axis)
 
 
-def body_canvas(frame, body):
-    """Gray image of the body region: x along the shoulders (left -> right), y towards the hips,
-    native resolution (one shoulder width = width px). Returns the image and the width."""
+def body_patch(frame, body, x_range, y_range, size):
+    """The body region x_range x y_range (shoulder widths; x along the shoulders, y towards the hips),
+    resampled from the original frame to size (width, height) px, in colour."""
     origin, x_axis, y_axis, width = body
-    x0, y0 = CANVAS_X[0] * width, CANVAS_Y[0] * width
-    # canvas pixel (u, v) -> original image: origin + (u + x0) * x_axis + (v + y0) * y_axis
-    matrix = np.array([[x_axis[0], y_axis[0], origin[0] + x0 * x_axis[0] + y0 * y_axis[0]],
-                       [x_axis[1], y_axis[1], origin[1] + x0 * x_axis[1] + y0 * y_axis[1]]])
+    sx = (x_range[1] - x_range[0]) * width / size[0]
+    sy = (y_range[1] - y_range[0]) * width / size[1]
+    x0, y0 = x_range[0] * width, y_range[0] * width
+    # patch pixel (u, v) -> original image: origin + (x0 + u sx) * x_axis + (y0 + v sy) * y_axis
+    matrix = np.array([[sx * x_axis[0], sy * y_axis[0], origin[0] + x0 * x_axis[0] + y0 * y_axis[0]],
+                       [sx * x_axis[1], sy * y_axis[1], origin[1] + x0 * x_axis[1] + y0 * y_axis[1]]])
+    return cv2.warpAffine(frame, matrix, size, flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                          borderValue=(0, 0, 0))
+
+
+def body_canvas(frame, body):
+    """Gray image of the body region CANVAS_X x CANVAS_Y at native resolution
+    (one shoulder width = body width px)."""
+    width = body[3]
     size = (round((CANVAS_X[1] - CANVAS_X[0]) * width), round((CANVAS_Y[1] - CANVAS_Y[0]) * width))
-    canvas = cv2.warpAffine(frame, matrix, size, flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-                            borderValue=(0, 0, 0))
-    return cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
+    # ranges matching the rounded size exactly, so one canvas pixel is one original pixel
+    x_range = (CANVAS_X[0], CANVAS_X[0] + size[0] / width)
+    y_range = (CANVAS_Y[0], CANVAS_Y[0] + size[1] / width)
+    return cv2.cvtColor(body_patch(frame, body, x_range, y_range, size), cv2.COLOR_BGR2GRAY)
 
 
 def to_canvas(point, width):
