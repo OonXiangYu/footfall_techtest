@@ -54,7 +54,8 @@ Put the sample video at `data\sample.mp4`. The confirmations from the final revi
 ```
 
 This writes `staff.csv`, `annotated.mp4`, `timeline.png` and the caches into `outputs\final`.
-`staff.csv` is identical to `results\staff.csv`.
+`staff.csv` is identical to `results\staff.csv`. To reproduce this run and every evaluation number
+with one command, see [Evaluation](#evaluation).
 
 ## How it works
 
@@ -163,21 +164,30 @@ needed 44.
 
 ## Evaluation
 
-All of these compare against the hand labels in `data\`, so they need the sample video:
+The evaluation compares against the hand labels in `data\`, so it needs the sample video at
+`data\sample.mp4`. One command reproduces every number in `results\summary.md`:
 
 ```
-.venv\Scripts\python.exe eval\eval_run.py outputs\final        # hits, presence, per-chain and per-frame diagnostics
-.venv\Scripts\python.exe eval\eval_review.py outputs\final     # simulated review users
-.venv\Scripts\python.exe eval\eval_linking.py outputs\final    # tracker gate and linking settings (purity)
-.venv\Scripts\python.exe eval\eval_detection.py                # original frame vs panorama
+.venv\Scripts\python.exe eval\reproduce.py
 ```
 
-`eval_detection.py` prints:
+It runs the pipeline with the final confirmations (`--no-review`), then the four scripts below.
+Each script's output goes to `outputs\reproduce\logs\`. At the end it prints each number next to
+the value in `results\summary.md`, checks that `staff.csv` is identical to `results\staff.csv`,
+and exits with an error if anything differs. Add `--keep-caches` on later runs to reuse the
+detections and appearance caches.
 
-| view | hits of 55 | boxes / frame |
+| step | question it answers | time |
 |---|---|---|
-| original frame | 15 (27%) | 2.8 |
-| panorama | 47 (86%) | 15.7 |
+| `src\staff_detect.py` | the final run: where is the staff member in each frame? | ~4 min (13 s with caches) |
+| `eval\eval_detection.py` | does the detector find the staff member better on the original frame or on the panorama? | ~17 s |
+| `eval\eval_linking.py <run>` | which tracker gate and linking settings keep one person per track (purity)? | ~14 s |
+| `eval\eval_run.py <run>` | how close is the output to the labels: hits, presence, per-track and frame-by-frame errors? | ~1 s |
+| `eval\eval_review.py <run>` | how much does a short review give: candidate ranking, simulated users, expansion threshold? | ~30 s (6 s with caches) |
+
+In total it takes about 5 minutes from scratch and under a minute with `--keep-caches`, measured
+on the development machine. Each script also runs on its own, for example
+`.venv\Scripts\python.exe eval\eval_run.py outputs\final`.
 
 The tag model's per-frame AUC on the held-out half of the video is 0.86 and 0.74 (tag visible vs
 other people). That is good enough to rank review candidates, not to pick the staff member
