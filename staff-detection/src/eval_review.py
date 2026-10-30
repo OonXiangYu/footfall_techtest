@@ -1,9 +1,10 @@
 """Simulate the semi-automatic mode (staff_detect.py --tag review) with the hand labels in data/gt.csv.
 
 - Candidate ranking: how many of the top 5 / 10 / 20 candidates are really the staff member.
-- Simulated user: confirms the best-ranked true staff candidate, then the next one whose chain is not
-  yet staff (another outfit / time), and so on; results after 1, 2 and 3 confirmations, with and
-  without appearance expansion.
+- Simulated users: one who confirms every true staff candidate on page 1 (and on pages 1-2), and the
+  earlier one who confirms one candidate per outfit (2 or 3 clicks); each scored with whole-chain and
+  window confirm scope, with and without appearance expansion, including the purity of everything
+  marked staff.
 - Expansion threshold: purity of the chains it adds (on labelled frames) for a range of thresholds.
 
 Uses the run folder's caches (detections.npz, appearance.npz, tag_scores_review.npz).
@@ -17,13 +18,12 @@ from eval_detection import load_gt_points
 from eval_pipeline import position_metrics, read_rows
 from appearance import similarity
 from fisheye import ANGLE_STEPS, owning_box, to_panorama_point
-from review import (CANDIDATE_SPACING, CANDIDATES_PER_CHAIN, EXPAND_MARGIN, EXPAND_SIMILARITY, EXPAND_SPEED,
-                    candidates, chain_summaries, expand)
+from review import (CANDIDATE_SPACING, CANDIDATES_PER_CHAIN, CONFIRM_WINDOW, EXPAND_MARGIN, EXPAND_SIMILARITY,
+                    EXPAND_SPEED, GRID, candidates, chain_summaries, expand, staff_from_clicks)
 from staff_detect import build_chains, parse_args as pipeline_args, review_scores, staff_per_frame, video_info
 from tag_crops import interpolate_chest
 
 ROOT = Path(__file__).resolve().parent.parent
-CONFIRMATIONS = 3
 THRESHOLDS = [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9]
 TARGET_PURITY = 0.95
 NEAR_LABEL = 12  # frames: a labelled frame this close decides a candidate's truth via its chain
@@ -34,7 +34,6 @@ def parse_args():
     parser.add_argument("run", help="output folder for the review mode (its caches are reused or created)")
     parser.add_argument("--video", default=str(ROOT / "data" / "sample.mp4"))
     parser.add_argument("--gt", default=str(ROOT / "data" / "gt.csv"))
-    parser.add_argument("--max-confirmations", type=int, default=CONFIRMATIONS)
     return parser.parse_args()
 
 
@@ -63,38 +62,56 @@ def candidate_truth(detections, frame_rows, chains, ranked, chest, owners):
 
 
 class Scenario:
-    """Everything needed to turn a set of staff chains into scores against gt.csv."""
+    """Turns confirmed clicks into staff chains (with a confirm scope and optional expansion) and scores
+    them against gt.csv."""
 
-    def __init__(self, state, gt_rows, info):
-        self.state, self.gt_rows, self.info = state, gt_rows, info
+    def __init__(self, state, gt_rows, gt_points, fps):
+        self.state, self.gt_rows, self.gt_points = state, gt_rows, gt_points
+        self.window = round(CONFIRM_WINDOW * fps)
 
-    def staff_chains(self, confirmed, threshold):
-        added = {}
-        if threshold is not None:
-            radius = self.state["radius"]
-            added = expand(confirmed, self.info, threshold, EXPAND_SPEED * radius, EXPAND_MARGIN * radius)
-        weights = {c: 2 for c in confirmed}
-        weights.update({c: 1 for c in added})
-        return set(confirmed) | set(added), weights, added
-
-    def score(self, staff_chains, weights):
+    def run(self, clicks, scope, threshold):
         s = self.state
-        staff = staff_per_frame(s["detections"], s["chains"], staff_chains, weights, s["frame_count"], s["max_gap"])
+        scoped, staff, weights, added = staff_from_clicks(s["detections"], s["chains"], s["hists"], clicks, scope,
+                                                          self.window, threshold, s["radius"])
+        result = self.score(scoped, staff, weights)
+        owners = staff_chain_per_frame(s["detections"], scoped, self.gt_points)
+        result["purity"] = chain_purity(staff, scoped, s["detections"]["frame"], owners)
+        result["added purity"] = chain_purity(added, scoped, s["detections"]["frame"], owners)
+        result["added"] = len(added)
+        return result
+
+    def score(self, chains, staff_chains, weights):
+        s = self.state
+        staff = staff_per_frame(s["detections"], chains, staff_chains, weights, s["frame_count"], s["max_gap"])
         pred = {f: ({"present": "1", "x": str(e[0]), "y": str(e[1])} if e else {"present": "0", "x": "", "y": ""})
                 for f, e in enumerate(staff)}
         metrics = position_metrics(self.gt_rows, pred, s["radius"])
         hits_key = next(k for k in metrics if k.startswith("hits"))
         return {"hits": metrics[hits_key], "median": metrics["median distance (px)"],
-                "labelled predicted": metrics["predicted on them"], "frames": sum(e is not None for e in staff)}
+                "frames": sum(e is not None for e in staff)}
 
 
-def simulate(scenario, ranked, truth, threshold, confirmations=CONFIRMATIONS):
-    """A user following the hint: confirm the best-ranked true candidate whose chain is not yet staff
-    and does not look like an already confirmed chain (another outfit); if there is none, the best-ranked
-    true candidate whose chain is not yet staff."""
-    confirmed, steps = [], []
-    staff = set()
-    info = scenario.info
+def chain_purity(chains_marked, chains, frames, owners):
+    """(on GT point, present): labelled frames where a marked chain is present, and how many of them it
+    owns the GT chest point."""
+    present = on_point = 0
+    for chain in chains_marked:
+        for frame in set(frames[chains == chain].tolist()) & set(owners):
+            present += 1
+            on_point += owners[frame] == chain
+    return on_point, present
+
+
+def page_user(ranked, truth, pages):
+    """Confirms every candidate on the first pages that really is the staff member."""
+    shown = GRID[0] * GRID[1] * pages
+    return [(c["chain"], c["frame"]) for c, ok in zip(ranked[:shown], truth[:shown]) if ok]
+
+
+def outfit_user(ranked, truth, info, confirmations, radius):
+    """The earlier simulation: one confirmation at a time, the best-ranked true candidate whose chain is
+    not yet staff (whole chains + expansion) and does not look like a confirmed chain (another outfit)."""
+    clicks, confirmed, staff = [], [], set()
     for _ in range(confirmations):
         open_ = [c for c, ok in zip(ranked, truth) if ok and c["chain"] not in staff]
 
@@ -103,21 +120,16 @@ def simulate(scenario, ranked, truth, threshold, confirmations=CONFIRMATIONS):
         pick = next((c for c in open_ if new_outfit(c)), open_[0] if open_ else None)
         if pick is None:
             break
+        clicks.append((pick["chain"], pick["frame"]))
         confirmed.append(pick["chain"])
-        staff, weights, added = scenario.staff_chains(confirmed, threshold)
-        steps.append((pick, len(added), scenario.score(staff, weights)))
-    return steps
+        staff = set(confirmed) | set(expand(confirmed, info, EXPAND_SIMILARITY, EXPAND_SPEED * radius,
+                                            EXPAND_MARGIN * radius))
+    return clicks
 
 
-def added_purity(added, chains, frames, owners):
-    """Labelled frames where an added chain is present, and how many of them it is on the GT point."""
-    present = on_point = 0
-    for chain in added:
-        chain_frames = set(frames[chains == chain].tolist())
-        for frame in chain_frames & set(owners):
-            present += 1
-            on_point += owners[frame] == chain
-    return on_point, present
+def fraction(pair):
+    on_point, present = pair
+    return f"{on_point}/{present} = {on_point / present:.0%}" if present else "-"
 
 
 def main():
@@ -130,42 +142,52 @@ def main():
     detections, chains = state["detections"], state["chains"]
     scores = review_scores(sargs, run, state)
     ranked = candidates(detections, chains, scores, fps)
-    owners = staff_chain_per_frame(detections, chains, load_gt_points(args.gt))
+    gt_points = load_gt_points(args.gt)
+    owners = staff_chain_per_frame(detections, chains, gt_points)
     truth = candidate_truth(detections, state["frame_rows"], chains, ranked, interpolate_chest(args.gt), owners)
 
+    per_page = GRID[0] * GRID[1]
     print(f"\nCandidates: {len(ranked)} (best {CANDIDATES_PER_CHAIN} per chain, top spread >= "
-          f"{CANDIDATE_SPACING:g} s apart); "
-          f"{sum(truth)} of them are the staff member")
+          f"{CANDIDATE_SPACING:g} s apart); {sum(truth)} of them are the staff member")
     for k in (5, 10, 20):
         print(f"  top {k:>2}: {sum(truth[:k])} staff  (ranks {[c['rank'] for c, t in zip(ranked[:k], truth[:k]) if t]})")
+    for pages in (1, 2):
+        shown = per_page * pages
+        print(f"  page{'s 1-2' if pages == 2 else ' 1'} ({shown} candidates): {sum(truth[:shown])} staff on "
+              f"{len({c['chain'] for c, t in zip(ranked[:shown], truth[:shown]) if t})} chain(s)")
 
-    scenario = Scenario(state, read_rows(args.gt), chain_summaries(detections, chains, state["hists"]))
-    print(f"\nSimulated user (confirms the best-ranked true candidate of a not-yet-confirmed outfit); "
+    info = chain_summaries(detections, chains, state["hists"])
+    scenario = Scenario(state, read_rows(args.gt), gt_points, fps)
+    users = [("page 1, all staff", page_user(ranked, truth, 1)),
+             ("pages 1-2, all staff", page_user(ranked, truth, 2)),
+             ("one per outfit x2", outfit_user(ranked, truth, info, 2, state["radius"])),
+             ("one per outfit x3", outfit_user(ranked, truth, info, 3, state["radius"]))]
+    print(f"\nSimulated users; confirm scope chain = whole linked chain, window = +-{CONFIRM_WINDOW:g} s; "
           f"expansion at similarity {EXPAND_SIMILARITY}")
-    print(f"{'':<16}{'confirm':>8}{'rank':>6}{'frame':>7}{'added':>7}{'hits of 55':>12}{'median px':>11}"
-          f"{'labelled w/ pred':>18}{'frames w/ pred':>16}")
-    for name, threshold in (("no expansion", None), ("with expansion", EXPAND_SIMILARITY)):
-        for k, (pick, added, result) in enumerate(simulate(scenario, ranked, truth, threshold,
-                                                           args.max_confirmations), 1):
-            print(f"{name if k == 1 else '':<16}{k:>8}{pick['rank']:>6}{pick['frame']:>7}{added:>7}"
-                  f"{result['hits']:>12}{result['median']:>11.1f}{result['labelled predicted']:>18}"
-                  f"{result['frames']:>16}")
+    print(f"{'user':<22}{'clicks':>7}{'scope':>8}{'expansion':>10}{'hits of 55':>12}{'median px':>11}"
+          f"{'frames w/ pred':>16}{'staff purity (labelled)':>26}")
+    for name, clicks in users:
+        first = True
+        for scope in ("chain", "window"):
+            for threshold in (None, EXPAND_SIMILARITY):
+                r = scenario.run(clicks, scope, threshold)
+                print(f"{name if first else '':<22}{(len(clicks) if first else ''):>7}{scope:>8}"
+                      f"{('+' + str(r['added']) if threshold else 'off'):>10}{r['hits']:>12}{r['median']:>11.1f}"
+                      f"{r['frames']:>16}{fraction(r['purity']):>26}")
+                first = False
 
-    # expansion threshold: purity of what it adds, with the 3 confirmations chosen without expansion
-    confirmed = [pick["chain"] for pick, _, _ in simulate(scenario, ranked, truth, None)]
-    print(f"\nExpansion threshold sweep ({len(confirmed)} confirmed chains: {confirmed})")
-    print(f"{'similarity':>10}{'added':>7}{'purity (labelled frames)':>27}{'hits of 55':>12}{'frames w/ pred':>16}")
+    # expansion threshold: purity of what it adds, for the page-1 user's confirmations (whole chains)
+    clicks = users[0][1]
+    print(f"\nExpansion threshold sweep (page-1 user, {len(clicks)} clicks, whole chains)")
+    print(f"{'similarity':>10}{'added':>7}{'added purity (labelled)':>26}{'hits of 55':>12}{'frames w/ pred':>16}")
     chosen = None
     for threshold in THRESHOLDS:
-        staff, weights, added = scenario.staff_chains(confirmed, threshold)
-        on_point, present = added_purity(added, chains, detections["frame"], owners)
-        purity = on_point / present if present else float("nan")
-        result = scenario.score(staff, weights)
-        print(f"{threshold:>10.2f}{len(added):>7}{f'{on_point}/{present} = {purity:.0%}' if present else '-':>27}"
-              f"{result['hits']:>12}{result['frames']:>16}")
-        if chosen is None and present and purity >= TARGET_PURITY:
+        r = scenario.run(clicks, "chain", threshold)
+        on_point, present = r["added purity"]
+        print(f"{threshold:>10.2f}{r['added']:>7}{fraction(r['added purity']):>26}{r['hits']:>12}{r['frames']:>16}")
+        if chosen is None and present and on_point / present >= TARGET_PURITY:
             chosen = threshold
-    print(f"\nLowest threshold with >= {TARGET_PURITY:.0%} purity: {chosen}")
+    print(f"\nLowest threshold with >= {TARGET_PURITY:.0%} purity of the added chains: {chosen}")
 
 
 if __name__ == "__main__":

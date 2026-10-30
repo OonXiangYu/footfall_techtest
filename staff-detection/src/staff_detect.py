@@ -27,8 +27,8 @@ from fisheye import ANGLE_STEPS, circle_for, owning_box, to_original_point, to_p
 from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, LONG_DISTANCE, LONG_GAP, MAX_LINK_DIST,
                      chain_ids, link_tracks, track_summaries)
 from pose import POSE_WEIGHTS, body_canvas, body_frame, keypoints_to_original, run_pose
-from review import (EXPAND_MARGIN, EXPAND_SIMILARITY, EXPAND_SPEED, candidates, chain_summaries, expand,
-                    load_confirmed, review, save_confirmed)
+from review import (CONFIRM_WINDOW, EXPAND_SIMILARITY, candidates, load_confirmed, review, save_confirmed,
+                    staff_from_clicks)
 from tag_crops import interpolate_chest
 from tag_model import best_position, llr, load_model
 from tracker import Tracker
@@ -52,6 +52,11 @@ def parse_args(argv=None):
                         help="--tag review: torso similarity for adding chains that look like a confirmed one")
     parser.add_argument("--no-expand", dest="expand", action="store_false",
                         help="--tag review: only the confirmed chains are staff")
+    parser.add_argument("--confirm-scope", choices=["chain", "window"], default="chain",
+                        help="--tag review: a confirmation marks its whole linked chain as staff (chain), or only "
+                             "the part within --confirm-window seconds of the clicked frame (window)")
+    parser.add_argument("--confirm-window", type=float, default=CONFIRM_WINDOW,
+                        help="--tag review --confirm-scope window: seconds either side of the click")
     parser.add_argument("--tag-labels", help="tag_gt.csv (y/n/u per frame), required for --tag oracle")
     parser.add_argument("--gt", default=str(ROOT / "data" / "gt.csv"),
                         help="hand-labelled chest points; --tag oracle uses them to locate the tag")
@@ -415,34 +420,32 @@ def review_scores(args, out, state):
     return scores
 
 
-def review_staff(args, out, fps, state, confirmed_chains=None):
-    """--tag review: confirmed chains (from the review page, a confirmed.json, or given) plus appearance
-    expansion. Returns (staff chains, {chain: 2 confirmed / 1 added})."""
+def review_staff(args, out, fps, state):
+    """--tag review: confirmed clicks (from the review page or a confirmed.json), scoped to whole chains or
+    a window around each click, plus appearance expansion. Returns (chain ids after scoping, staff chains,
+    {chain: 2 confirmed / 1 added})."""
     detections, chains, keep = state["detections"], state["chains"], state["keep"]
-    if confirmed_chains is None:
-        kept_row_of = np.full(state["all_rows"], -1)
-        kept_row_of[keep] = np.arange(int(keep.sum()))
-        if args.confirmed:
-            confirmed_chains = load_confirmed(args.confirmed, chains, kept_row_of)
-            print(f"   confirmed: {len(confirmed_chains)} chain(s) from {args.confirmed}")
-        else:
-            scores = review_scores(args, out, state)
-            ranked = candidates(detections, chains, scores, fps)
-            print(f"   review: {len(ranked)} candidates; opening the review page")
-            picked = [ranked[i] for i in review(args.video, detections, ranked, bool(detections["use_pano"]))]
-            save_confirmed(out / "confirmed.json", picked, np.flatnonzero(keep))
-            confirmed_chains = {c["chain"] for c in picked}
-            print(f"   confirmed {len(picked)} candidate(s) -> {len(confirmed_chains)} chain(s); "
-                  f"saved {out / 'confirmed.json'}")
-    added = {}
-    if args.expand and confirmed_chains:
-        info = chain_summaries(detections, chains, state["hists"])
-        added = expand(confirmed_chains, info, args.expand_similarity, EXPAND_SPEED * state["radius"],
-                       EXPAND_MARGIN * state["radius"])
-        print(f"   appearance expansion (similarity >= {args.expand_similarity}): added {len(added)} chain(s)")
-    weights = Counter({c: 2 for c in confirmed_chains})
-    weights.update({c: 1 for c in added})
-    return set(confirmed_chains) | set(added), weights
+    kept_row_of = np.full(state["all_rows"], -1)
+    kept_row_of[keep] = np.arange(int(keep.sum()))
+    if args.confirmed:
+        clicks = load_confirmed(args.confirmed, chains, kept_row_of)
+        print(f"   confirmed: {len(clicks)} click(s) on {len({c for c, _ in clicks})} chain(s) from {args.confirmed}")
+    else:
+        scores = review_scores(args, out, state)
+        ranked = candidates(detections, chains, scores, fps)
+        print(f"   review: {len(ranked)} candidates; opening the review page")
+        picked = [ranked[i] for i in review(args.video, detections, ranked, bool(detections["use_pano"]))]
+        save_confirmed(out / "confirmed.json", picked, np.flatnonzero(keep))
+        clicks = [(c["chain"], c["frame"]) for c in picked]
+        print(f"   confirmed {len(picked)} candidate(s) on {len({c for c, _ in clicks})} chain(s); "
+              f"saved {out / 'confirmed.json'}")
+    scoped, staff, weights, added = staff_from_clicks(
+        detections, chains, state["hists"], clicks, args.confirm_scope, round(args.confirm_window * fps),
+        args.expand_similarity if args.expand else None, state["radius"])
+    scope = "whole chains" if args.confirm_scope == "chain" else f"+-{args.confirm_window:g} s around each click"
+    print(f"   confirm scope: {scope}; appearance expansion "
+          f"{f'(similarity >= {args.expand_similarity}): added {len(added)} chain(s)' if args.expand else 'off'}")
+    return scoped, staff, Counter(weights)
 
 
 def main():
@@ -478,7 +481,7 @@ def main():
         extra = {"evidence": np.array([hits[c] for c in hits], float),
                  "scored_count": np.array([scored[c] for c in hits], int)}
     elif args.tag == "review":
-        staff_chains, hits = review_staff(args, out, fps, state)
+        chains, staff_chains, hits = review_staff(args, out, fps, state)
     else:
         hits = oracle_tag_hits(args, detections, frame_rows, chains)
         staff_chains = {chain for chain, count in hits.items() if count >= args.min_hits}

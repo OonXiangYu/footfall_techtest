@@ -21,6 +21,8 @@ WINDOW = "staff review"
 HINT = ["Click the staff member (toggle). The staff may change clothes:",
         "confirm one candidate per outfit.   n / p = next / previous page, Enter = done"]
 
+CONFIRM_WINDOW = 5.0  # seconds either side of a click kept as staff with --confirm-scope window
+
 # appearance expansion
 # torso-histogram similarity to a confirmed chain: the lowest threshold whose added chains were >= 95% on
 # the staff in both simulated users of eval_review.py (rank order: 0.75 ok; outfit-aware: 0.75 = 43%,
@@ -162,16 +164,47 @@ def save_confirmed(path, confirmed, full_row_of):
 
 
 def load_confirmed(path, chains, kept_row_of):
-    """Chains of the confirmed detections (by their detections.npz row, so the file survives re-linking).
-    kept_row_of: detections.npz row -> row after dropping duplicates, or -1."""
-    staff = set()
+    """The confirmed clicks as [(chain, frame)], found by their detections.npz row so the file survives
+    re-linking. kept_row_of: detections.npz row -> row after dropping duplicates, or -1."""
+    clicks = []
     for entry in json.loads(Path(path).read_text())["confirmed"]:
         row = kept_row_of[entry["detection"]]
         if row < 0:
             print(f"   confirmed detection {entry['detection']} (frame {entry['frame']}) was dropped; skipped")
             continue
-        staff.add(int(chains[row]))
-    return staff
+        clicks.append((int(chains[row]), int(entry["frame"])))
+    return clicks
+
+
+def scope_chains(chains, frames, clicks, scope, window_frames):
+    """Chain ids with the confirmed scope applied, and the confirmed ids.
+    chain: a click confirms its whole linked chain.
+    window: only the chain's detections within window_frames of a click on it are confirmed; the rest
+    of that chain becomes a separate (unconfirmed) chain."""
+    confirmed = {chain for chain, _ in clicks}
+    if scope == "chain":
+        return chains, confirmed
+    scoped = chains.copy()
+    offset = int(chains.max()) + 1
+    for chain in confirmed:
+        clicked = np.array([frame for c, frame in clicks if c == chain])
+        rows = np.flatnonzero(chains == chain)
+        outside = np.abs(frames[rows][:, None] - clicked[None, :]).min(axis=1) > window_frames
+        scoped[rows[outside]] = chain + offset
+    return scoped, confirmed
+
+
+def staff_from_clicks(detections, chains, hists, clicks, scope, window_frames, threshold, radius):
+    """Staff from confirmed clicks: (chain ids after scoping, staff chains, {chain: 2 confirmed / 1 added},
+    added chains). threshold None: no appearance expansion."""
+    scoped, confirmed = scope_chains(chains, detections["frame"], clicks, scope, window_frames)
+    added = {}
+    if threshold is not None and confirmed:
+        info = chain_summaries(detections, scoped, hists)
+        added = expand(confirmed, info, threshold, EXPAND_SPEED * radius, EXPAND_MARGIN * radius)
+    weights = {c: 2 for c in confirmed}
+    weights.update({c: 1 for c in added})
+    return scoped, set(confirmed) | set(added), weights, added
 
 
 # ---- appearance expansion ------------------------------------------------------------------------

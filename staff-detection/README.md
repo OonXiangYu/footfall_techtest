@@ -46,6 +46,10 @@ mode a person confirms the staff member once, on a review page, and everything e
    Confirmations are stored by detection, so they stay valid when tracking or linking changes.
 
 3. **Options.**
+   - `--confirm-scope chain` (default): a confirmation marks the person's whole track (all the
+     pieces the tracker linked together) as the staff member. `--confirm-scope window` keeps only
+     the part within `--confirm-window` seconds (default 5) of the confirmed frame; use it if a
+     track sometimes switches to another person.
    - `--expand-similarity 0.8` (default): after confirmation, other tracks are added as the staff
      member if their torso colours match a confirmed track this closely, they never overlap in
      time with a staff track, and the staff member could have walked between them.
@@ -59,18 +63,24 @@ mode a person confirms the staff member once, on a review page, and everything e
    .venv\Scripts\python.exe src\eval_review.py outputs\run_review
    ```
 
-   `eval_pipeline.py` scores `staff.csv`. `eval_review.py` simulates a user with the labels: how
-   many of the top candidates are the staff member, the results after 1, 2 and 3 confirmations,
-   and the purity of the tracks added by the expansion at several thresholds.
+   `eval_pipeline.py` scores `staff.csv`. `eval_review.py` simulates users with the labels: how
+   many of the top candidates are the staff member; the results when every staff candidate on
+   page 1 (or pages 1-2) is confirmed, and with one confirmation per outfit; for both confirm
+   scopes, with and without expansion; and the purity of the tracks expansion adds.
 
 ### Results on the sample video
 
-| | position hits (of 55 labelled frames) | median error |
-|---|---|---|
-| semi-automatic, 2 confirmations + expansion | 11 | 13.9 px |
-| oracle (hand tag labels on every 5th frame) | 21 | 19.5 px |
+Simulated with the hand labels (`eval_review.py`), whole-track confirmation:
+
+| | confirmations | position hits (of 55 labelled frames) | median error | frames with the staff marked | marked frames really the staff |
+|---|---|---|---|---|---|
+| confirm every staff candidate on page 1 | 6 | 9 | 44 px | 454 | 79% |
+| confirm every staff candidate on pages 1-2 | 9 | 15 | 43 px | 718 | 84% |
+| one confirmation per outfit, 2 clicks, + expansion | 2 | 11 | 14 px | 329 | 100% |
+| oracle (hand tag labels on every 5th frame) | - | 21 | 20 px | 687 | - |
 
 A hit is a predicted point within 0.10 of the fisheye radius (48 px) of the labelled chest point.
-4 of the top 5 review candidates were the staff member. Coverage is limited by how far the tracks
-can be followed: each confirmation covers one track (often 1–10 s), and expansion only adds tracks
-whose appearance clearly matches.
+4 of the top 5 review candidates were the staff member (6 of the 12 on page 1). Confirming more
+candidates covers more of the video, but some tracks switch to another person for part of their
+length, so purity drops below 100%. The staff member is hard to find while seated (the tag is
+not visible), so the seated stretch at the start is rarely among the candidates.
