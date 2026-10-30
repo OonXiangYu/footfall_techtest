@@ -48,14 +48,18 @@ def parse_args(argv=None):
     parser.add_argument("--tag", choices=["auto", "oracle", "review"], default="auto",
                         help="auto: tag detector; oracle: hand tag labels; review: a human confirms the staff "
                              "among ranked candidates (semi-automatic)")
-    parser.add_argument("--confirmed", help="--tag review: reuse a confirmed.json instead of opening the review page")
+    parser.add_argument("--confirmed", help="--tag review: start the review page from these confirmations "
+                                            "(with --no-review: use them as they are, without the page)")
+    parser.add_argument("--no-review", dest="review", action="store_false",
+                        help="--tag review --confirmed: do not open the review page")
     parser.add_argument("--expand-similarity", type=float, default=EXPAND_SIMILARITY,
                         help="--tag review: torso similarity for adding chains that look like a confirmed one")
     parser.add_argument("--no-expand", dest="expand", action="store_false",
                         help="--tag review: only the confirmed chains are staff")
     parser.add_argument("--confirm-scope", choices=["chain", "window"], default="chain",
-                        help="--tag review: a confirmation marks its whole linked chain as staff (chain), or only "
-                             "the part within --confirm-window seconds of the clicked frame (window)")
+                        help="--tag review: scope of confirmations that do not carry their own (the review page "
+                             "stores one per click): the whole linked chain, or only --confirm-window seconds around "
+                             "the clicked frame")
     parser.add_argument("--per-page", type=int, default=PER_PAGE,
                         help="--tag review: candidates per review page (4 per row)")
     parser.add_argument("--ui-height", type=int, default=None,
@@ -483,30 +487,47 @@ def review_scores(args, out, state):
 
 
 def review_staff(args, out, fps, state):
-    """--tag review: confirmed clicks (from the review page or a confirmed.json), scoped to whole chains or
-    a window around each click, plus appearance expansion. Returns (chain ids after scoping, staff chains,
-    {chain: 2 confirmed / 1 added})."""
+    """--tag review: confirmed clicks (from the review page, optionally starting from a confirmed.json, or
+    from the file alone with --no-review), each scoped to its whole chain or a window around the click (stored
+    per click; --confirm-scope for clicks without one), plus appearance expansion. Returns (chain ids after
+    scoping, staff chains, {chain: 2 confirmed / 1 added})."""
     detections, chains, keep = state["detections"], state["chains"], state["keep"]
     kept_row_of = np.full(state["all_rows"], -1)
     kept_row_of[keep] = np.arange(int(keep.sum()))
+    previous = load_confirmed(args.confirmed, chains, kept_row_of) if args.confirmed else []
     if args.confirmed:
-        clicks = load_confirmed(args.confirmed, chains, kept_row_of)
-        print(f"   confirmed: {len(clicks)} click(s) on {len({c for c, _ in clicks})} chain(s) from {args.confirmed}")
+        print(f"   confirmed: {len(previous)} click(s) on {len({c for c, *_ in previous})} chain(s) "
+              f"from {args.confirmed}")
+    if args.confirmed and not args.review:
+        clicks = [(chain, frame, scope) for chain, frame, _, scope in previous]
     else:
         scores = review_scores(args, out, state)
         ranked = candidates(detections, chains, scores, fps)
-        print(f"   review: {len(ranked)} candidates; opening the review page")
-        picked = [ranked[i] for i in review(args.video, detections, ranked, bool(detections["use_pano"]),
-                                            args.per_page, args.ui_height)]
+        # earlier confirmations: select the matching candidates; ones that are no longer candidates are
+        # shown first (labelled "prev") so they can still be removed
+        row_index = {c["row"]: i for i, c in enumerate(ranked)}
+        extra = [{"row": row, "frame": frame, "chain": chain, "rank": "prev",
+                  "score": float(np.nan_to_num(scores[row]))}
+                 for chain, frame, row, _ in previous if row not in row_index]
+        shown = extra + ranked
+        preselected = {}
+        for chain, frame, row, scope in previous:
+            index = row_index[row] + len(extra) if row in row_index else next(
+                i for i, c in enumerate(extra) if c["row"] == row)
+            preselected[index] = scope or args.confirm_scope
+        print(f"   review: {len(ranked)} candidates ({len(preselected)} already selected); opening the review page")
+        selected = review(args.video, detections, chains, shown, bool(detections["use_pano"]), args.per_page,
+                          args.ui_height, preselected)
+        picked = [(shown[i], scope) for i, scope in selected.items()]
         save_confirmed(out / "confirmed.json", picked, np.flatnonzero(keep))
-        clicks = [(c["chain"], c["frame"]) for c in picked]
-        print(f"   confirmed {len(picked)} candidate(s) on {len({c for c, _ in clicks})} chain(s); "
-              f"saved {out / 'confirmed.json'}")
+        clicks = [(c["chain"], c["frame"], scope) for c, scope in picked]
+        print(f"   confirmed {len(picked)} candidate(s) on {len({c for c, *_ in clicks})} chain(s) "
+              f"({sum(s == 'window' for *_, s in clicks)} with window scope); saved {out / 'confirmed.json'}")
     scoped, staff, weights, added = staff_from_clicks(
         detections, chains, state["hists"], clicks, args.confirm_scope, round(args.confirm_window * fps),
         args.expand_similarity if args.expand else None, state["radius"])
-    scope = "whole chains" if args.confirm_scope == "chain" else f"+-{args.confirm_window:g} s around each click"
-    print(f"   confirm scope: {scope}; appearance expansion "
+    print(f"   confirm scope: per click (default {args.confirm_scope}, window +-{args.confirm_window:g} s); "
+          f"appearance expansion "
           f"{f'(similarity >= {args.expand_similarity}): added {len(added)} chain(s)' if args.expand else 'off'}")
     return scoped, staff, Counter(weights)
 

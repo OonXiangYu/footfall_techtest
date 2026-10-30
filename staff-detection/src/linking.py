@@ -5,7 +5,10 @@ from scipy.optimize import linear_sum_assignment
 
 # defaults, as fractions of the fisheye radius (distances) or seconds (gap)
 LINK_SPEED = 0.01  # link distance per frame of gap (~ the staff member's median speed)
-LINK_MARGIN = 0.05  # extra link distance
+# extra link distance; 0.12 (58 px) covers the 20-45 px box-centre jitter of a walking person. Purity
+# stays 98% at 0.05-0.12; it adds few links because most missed handovers are crowded (the ratio test
+# refuses them, correctly cautious), not out of reach.
+LINK_MARGIN = 0.12
 MAX_LINK_DIST = 0.20  # cap, so long gaps cannot allow jumps across the room
 LINK_GAP = 4.0  # max seconds between a track end and the next start
 # ratio test: link only if clearly better than the next-best option; chosen by chain purity

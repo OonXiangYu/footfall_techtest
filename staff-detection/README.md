@@ -30,7 +30,11 @@ mode a person confirms the staff member once, on a review page, and everything e
    .venv\Scripts\python.exe src\staff_detect.py --video data\sample.mp4 --out outputs\run_review --tag review
    ```
 
-   - Click a candidate to mark it as the staff member (click again to undo).
+   - Click a candidate to see its whole track: 5 frames spread from its start to its end, each with
+     the person outlined. Then `y` confirms the whole track, `w` confirms only the 5 s either side
+     of the clicked frame (for a track that switches to someone else), `Esc` cancels.
+   - Click a confirmed candidate (green) to remove it. A warning on a confirmed tile means it is in
+     the same frames as another confirmed track; at most one of them can be the staff member.
    - The staff member may change clothes: confirm one candidate per outfit.
    - `n` / `p`: next / previous page. `Enter`: done. (The keys are also printed in the terminal.)
    - `--per-page 8` sets the candidates per page (4 per row); `--ui-height 700` caps the window
@@ -39,19 +43,21 @@ mode a person confirms the staff member once, on a review page, and everything e
    The confirmations are saved to `outputs\run_review\confirmed.json`, and the run finishes with
    `staff.csv`, `annotated.mp4` and `timeline.png` in the same folder.
 
-2. **Rerun without the review page**, e.g. after changing settings, reusing the confirmations:
+2. **Continue a review** from earlier confirmations (they open already selected), or add
+   `--no-review` to reuse them without the page, e.g. after changing settings:
 
    ```
    .venv\Scripts\python.exe src\staff_detect.py --video data\sample.mp4 --out outputs\run_review --tag review --confirmed outputs\run_review\confirmed.json
    ```
 
-   Confirmations are stored by detection, so they stay valid when tracking or linking changes.
+   Confirmations are stored by detection, with their scope (whole track or 5 s window), so they stay
+   valid when tracking or linking changes.
 
 3. **Options.**
-   - `--confirm-scope chain` (default): a confirmation marks the person's whole track (all the
-     pieces the tracker linked together) as the staff member. `--confirm-scope window` keeps only
-     the part within `--confirm-window` seconds (default 5) of the confirmed frame; use it if a
-     track sometimes switches to another person.
+   - `--confirm-scope chain` (default): the scope for confirmations that do not store their own:
+     the person's whole track (all the pieces the tracker linked together), or with `window` only
+     the part within `--confirm-window` seconds (default 5) of the confirmed frame. The review page
+     stores the scope you choose (`y` / `w`) with each confirmation.
    - `--expand-similarity 0.8` (default): after confirmation, other tracks are added as the staff
      member if their torso colours match a confirmed track this closely, they never overlap in
      time with a staff track, and the staff member could have walked between them.

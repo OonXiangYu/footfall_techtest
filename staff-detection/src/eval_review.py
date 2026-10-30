@@ -18,8 +18,8 @@ from eval_detection import load_gt_points
 from eval_pipeline import position_metrics, read_rows
 from appearance import similarity
 from fisheye import ANGLE_STEPS, owning_box, to_panorama_point
-from review import (CANDIDATE_SPACING, CANDIDATES_PER_CHAIN, CONFIRM_WINDOW, EXPAND_MARGIN, EXPAND_SIMILARITY,
-                    EXPAND_SPEED, PER_PAGE, candidates, chain_summaries, expand, staff_from_clicks)
+from review import (CANDIDATES_PER_CHAIN, CONFIRM_WINDOW, EXPAND_MARGIN, EXPAND_SIMILARITY,
+                    EXPAND_SPEED, MIN_CHAIN_SECONDS, PER_PAGE, candidates, chain_summaries, expand, staff_from_clicks)
 from staff_detect import build_chains, parse_args as pipeline_args, review_scores, staff_per_frame, video_info
 from tag_crops import interpolate_chest
 
@@ -148,8 +148,8 @@ def main():
     truth = candidate_truth(detections, state["frame_rows"], chains, ranked, interpolate_chest(args.gt), owners)
 
     per_page = PER_PAGE
-    print(f"\nCandidates: {len(ranked)} (best {CANDIDATES_PER_CHAIN} per chain, top spread >= "
-          f"{CANDIDATE_SPACING:g} s apart); {sum(truth)} of them are the staff member")
+    print(f"\nCandidates: {len(ranked)} (each chain >= {MIN_CHAIN_SECONDS:g} s: its best frame first, then up to "
+          f"{CANDIDATES_PER_CHAIN} per chain); {sum(truth)} of them are the staff member")
     for k in (5, 10, 20):
         print(f"  top {k:>2}: {sum(truth[:k])} staff  (ranks {[c['rank'] for c, t in zip(ranked[:k], truth[:k]) if t]})")
     for pages in (1, 2):
