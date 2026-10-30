@@ -130,3 +130,12 @@ def owning_box(point, boxes, wrap_width=None):
 # determine is the point in any box
 def point_in_any_box(point, boxes, wrap_width=None):
     return owning_box(point, boxes, wrap_width) is not None
+
+
+def box_outline(box, circle, steps=20):
+    """A panorama box's edges mapped back to the original image (a curved quadrilateral), int32 points."""
+    x1, y1, x2, y2 = box
+    xs, ys = np.linspace(x1, x2, steps), np.linspace(y1, y2, steps)
+    edge = ([(x, y1) for x in xs] + [(x2, y) for y in ys] +
+            [(x, y2) for x in xs[::-1]] + [(x1, y) for y in ys[::-1]])
+    return np.array([to_original_point(x, y, *circle) for x, y in edge], np.int32)

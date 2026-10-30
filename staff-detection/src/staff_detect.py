@@ -27,6 +27,8 @@ from fisheye import ANGLE_STEPS, circle_for, owning_box, to_original_point, to_p
 from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, LONG_DISTANCE, LONG_GAP, MAX_LINK_DIST,
                      chain_ids, link_tracks, track_summaries)
 from pose import POSE_WEIGHTS, body_canvas, body_frame, keypoints_to_original, run_pose
+from review import (EXPAND_MARGIN, EXPAND_SIMILARITY, EXPAND_SPEED, candidates, chain_summaries, expand,
+                    load_confirmed, review, save_confirmed)
 from tag_crops import interpolate_chest
 from tag_model import best_position, llr, load_model
 from tracker import Tracker
@@ -37,12 +39,19 @@ STAFF_COLOR = (0, 200, 0)
 OTHER_COLOR = (170, 170, 170)
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--video", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--unwarp", choices=["auto", "on", "off"], default="auto")
-    parser.add_argument("--tag", choices=["auto", "oracle"], default="auto")
+    parser.add_argument("--tag", choices=["auto", "oracle", "review"], default="auto",
+                        help="auto: tag detector; oracle: hand tag labels; review: a human confirms the staff "
+                             "among ranked candidates (semi-automatic)")
+    parser.add_argument("--confirmed", help="--tag review: reuse a confirmed.json instead of opening the review page")
+    parser.add_argument("--expand-similarity", type=float, default=EXPAND_SIMILARITY,
+                        help="--tag review: torso similarity for adding chains that look like a confirmed one")
+    parser.add_argument("--no-expand", dest="expand", action="store_false",
+                        help="--tag review: only the confirmed chains are staff")
     parser.add_argument("--tag-labels", help="tag_gt.csv (y/n/u per frame), required for --tag oracle")
     parser.add_argument("--gt", default=str(ROOT / "data" / "gt.csv"),
                         help="hand-labelled chest points; --tag oracle uses them to locate the tag")
@@ -78,7 +87,7 @@ def parse_args():
                         help="ratio test for links: only link when clearly the best option; 0 turns it off")
     parser.add_argument("--tag-every", type=int, default=5, help="--tag auto: score tags every N frames")
     parser.add_argument("--min-hits", type=int, default=2, help="--tag oracle: tag hits for a chain to count as staff")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.tag == "oracle" and not args.tag_labels:
         parser.error("--tag oracle needs --tag-labels")
     return args
@@ -335,14 +344,8 @@ def write_timeline(path, staff, fps):
 
 # ---- main ----------------------------------------------------------------------------------------
 
-def main():
-    args = parse_args()
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    fps, frame_count = video_info(args.video)
-    print(f"Video: {args.video}  {frame_count} frames at {fps:.2f} fps")
-    timings = {}
-
+def build_chains(args, out, fps, frame_count, timings):
+    """Stages 1-3: detection (cached), appearance (cached), duplicate removal, tracking, linking."""
     start = time.perf_counter()
     cache_path, key = out / "detections.npz", cache_key(args)
     detections = load_cached_detections(cache_path, key)
@@ -360,7 +363,7 @@ def main():
     all_rows = len(detections["frame"])
 
     hists = None
-    if args.link_appearance:
+    if args.link_appearance or args.tag == "review":
         start = time.perf_counter()
         hists, from_pose = load_or_compute_appearance(out / "appearance.npz", args.video, detections, frame_rows)
         timings["appearance"] = time.perf_counter() - start
@@ -385,13 +388,73 @@ def main():
           f"at the longest gap ({max_gap} frames) that is {min(speed * max_gap + margin, cap):.1f} px")
     ratio = args.link_ratio if args.link_ratio > 0 else None
     print(f"   link ratio test: {ratio or 'off'}")
-    if hists is not None:
+    link_hists = hists if args.link_appearance else None
+    if link_hists is not None:
         print(f"   appearance linking: ratio-test rescue; still-person pass up to {args.long_gap:g} s "
               f"within {args.long_distance * radius:.1f} px")
-    chains, track_count, link_count = link(detections, track_ids, max_gap, speed, margin, cap, ratio, hists,
+    chains, track_count, link_count = link(detections, track_ids, max_gap, speed, margin, cap, ratio, link_hists,
                                            round(args.long_gap * fps), args.long_distance * radius)
     timings["linking"] = time.perf_counter() - start
     print(f"3. linking: {link_count} links, {track_count} tracks -> {len(set(chains.tolist()))} chains")
+    return {"detections": detections, "frame_rows": frame_rows, "keep": keep, "all_rows": all_rows,
+            "hists": hists, "chains": chains, "radius": radius, "frame_count": frame_count, "max_gap": max_gap}
+
+
+def review_scores(args, out, state):
+    """Tag scores (all-data model) of every scored detection row, cached in <out>/tag_scores_review.npz."""
+    path = out / "tag_scores_review.npz"
+    model_path = Path(args.tag_model)
+    key = json.dumps({"model": str(model_path.resolve()), "mtime": model_path.stat().st_mtime,
+                      "every": args.tag_every, "rows": int(state["keep"].sum())})
+    if path.exists():
+        cached = np.load(path)
+        if str(cached["key"]) == key:
+            return cached["score"]
+    scores, _ = score_tags(args, state["detections"], state["frame_rows"], [(load_model(model_path), lambda f: True)])
+    np.savez(path, key=key, score=scores)
+    return scores
+
+
+def review_staff(args, out, fps, state, confirmed_chains=None):
+    """--tag review: confirmed chains (from the review page, a confirmed.json, or given) plus appearance
+    expansion. Returns (staff chains, {chain: 2 confirmed / 1 added})."""
+    detections, chains, keep = state["detections"], state["chains"], state["keep"]
+    if confirmed_chains is None:
+        kept_row_of = np.full(state["all_rows"], -1)
+        kept_row_of[keep] = np.arange(int(keep.sum()))
+        if args.confirmed:
+            confirmed_chains = load_confirmed(args.confirmed, chains, kept_row_of)
+            print(f"   confirmed: {len(confirmed_chains)} chain(s) from {args.confirmed}")
+        else:
+            scores = review_scores(args, out, state)
+            ranked = candidates(detections, chains, scores, fps)
+            print(f"   review: {len(ranked)} candidates; opening the review page")
+            picked = [ranked[i] for i in review(args.video, detections, ranked, bool(detections["use_pano"]))]
+            save_confirmed(out / "confirmed.json", picked, np.flatnonzero(keep))
+            confirmed_chains = {c["chain"] for c in picked}
+            print(f"   confirmed {len(picked)} candidate(s) -> {len(confirmed_chains)} chain(s); "
+                  f"saved {out / 'confirmed.json'}")
+    added = {}
+    if args.expand and confirmed_chains:
+        info = chain_summaries(detections, chains, state["hists"])
+        added = expand(confirmed_chains, info, args.expand_similarity, EXPAND_SPEED * state["radius"],
+                       EXPAND_MARGIN * state["radius"])
+        print(f"   appearance expansion (similarity >= {args.expand_similarity}): added {len(added)} chain(s)")
+    weights = Counter({c: 2 for c in confirmed_chains})
+    weights.update({c: 1 for c in added})
+    return set(confirmed_chains) | set(added), weights
+
+
+def main():
+    args = parse_args()
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    fps, frame_count = video_info(args.video)
+    print(f"Video: {args.video}  {frame_count} frames at {fps:.2f} fps")
+    timings = {}
+    state = build_chains(args, out, fps, frame_count, timings)
+    detections, frame_rows, chains = state["detections"], state["frame_rows"], state["chains"]
+    keep, all_rows, frame_count, max_gap = state["keep"], state["all_rows"], state["frame_count"], state["max_gap"]
 
     start = time.perf_counter()
     scored, extra = Counter(), {}
@@ -414,6 +477,8 @@ def main():
                  split=int(models[0][0]["split"]))
         extra = {"evidence": np.array([hits[c] for c in hits], float),
                  "scored_count": np.array([scored[c] for c in hits], int)}
+    elif args.tag == "review":
+        staff_chains, hits = review_staff(args, out, fps, state)
     else:
         hits = oracle_tag_hits(args, detections, frame_rows, chains)
         staff_chains = {chain for chain, count in hits.items() if count >= args.min_hits}
@@ -428,6 +493,9 @@ def main():
     if args.tag == "auto":
         top = ", ".join(f"{c}:{v:+.1f}/{scored[c]}" for c, v in hits.most_common(8))
         print(f"4. tag evidence (auto): {len(staff_chains)} staff chain(s); top chains (id:evidence/scored) {top}")
+    elif args.tag == "review":
+        print(f"4. staff (review): {sum(v == 2 for v in hits.values())} confirmed + "
+              f"{sum(v == 1 for v in hits.values())} added chain(s)")
     else:
         top = ", ".join(f"{c}:{n}" for c, n in hits.most_common(8))
         print(f"4. tag evidence (oracle): {len(staff_chains)} staff chain(s) with >= {args.min_hits} hits; "

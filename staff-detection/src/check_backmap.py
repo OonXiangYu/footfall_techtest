@@ -6,8 +6,8 @@ from ultralytics import YOLO
 
 from detections import detect_view
 from eval_detection import DEFAULT_CONF, DEFAULT_IMGSZ, ROOT, load_gt_points, read_frames
-from fisheye import (ANGLE_STEPS, fallback_circle, find_fisheye_circle, owning_box, to_original_point,
-                     to_panorama_point)
+from fisheye import (ANGLE_STEPS, box_outline, fallback_circle, find_fisheye_circle, owning_box,
+                     to_original_point, to_panorama_point)
 
 OUT_DIR = ROOT / "outputs" / "backmap"
 SAMPLE_COUNT = 8
@@ -28,15 +28,6 @@ def check_round_trip(gt_points, circle):
 def staff_box(point, boxes):
     index = owning_box(point, boxes, ANGLE_STEPS)
     return None if index is None else boxes[index]
-
-# convert the boxes on the unwarp img to the ori img
-def box_outline(box, circle, steps=20):
-    x1, y1, x2, y2 = box
-    xs, ys = np.linspace(x1, x2, steps), np.linspace(y1, y2, steps)
-    edge = ([(x, y1) for x in xs] + [(x2, y) for y in ys] +
-            [(x, y2) for x in xs[::-1]] + [(x1, y) for y in ys[::-1]])
-    return np.array([to_original_point(x, y, *circle) for x, y in edge], np.int32)
-
 
 def draw(frame, index, gt, centre, outline, distance):
     image = frame.copy()
