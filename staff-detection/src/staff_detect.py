@@ -23,7 +23,7 @@ from ultralytics import YOLO
 from crops import box_chest_point
 from appearance import load_or_compute_appearance, match_poses, similarity, track_ends
 from detections import choose_view, detect_people, duplicate_rows, keep_rows, rows_per_frame
-from fisheye import ANGLE_STEPS, circle_for, owning_box, to_original_point, to_panorama_point
+from fisheye import ANGLE_STEPS, box_outline, circle_for, owning_box, to_original_point, to_panorama_point
 from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, LONG_DISTANCE, LONG_GAP, MAX_LINK_DIST,
                      chain_ids, link_tracks, track_summaries)
 from pose import POSE_WEIGHTS, body_canvas, body_frame, keypoints_to_original, run_pose
@@ -37,6 +37,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PROBE_FRAMES = 50
 STAFF_COLOR = (0, 200, 0)
 OTHER_COLOR = (170, 170, 170)
+SWITCH_PENALTY = 0.10  # staff path: cost of changing chain, as a fraction of the radius (in px of jump)
 
 
 def parse_args(argv=None):
@@ -95,6 +96,13 @@ def parse_args(argv=None):
     parser.add_argument("--link-ratio", type=float, default=LINK_RATIO,
                         help="ratio test for links: only link when clearly the best option; 0 turns it off")
     parser.add_argument("--tag-every", type=int, default=5, help="--tag auto: score tags every N frames")
+    parser.add_argument("--max-hold", type=float, default=0.5,
+                        help="seconds a staff position may be interpolated without a detection; longer gaps are "
+                             "reported as not present")
+    parser.add_argument("--switch-penalty", type=float, default=SWITCH_PENALTY,
+                        help="staff path: cost of changing chain, fraction of the radius")
+    parser.add_argument("--debug", action="store_true",
+                        help="annotated video: also draw every other chain with its id (default: only the staff)")
     parser.add_argument("--min-hits", type=int, default=2, help="--tag oracle: tag hits for a chain to count as staff")
     args = parser.parse_args(argv)
     if args.tag == "oracle" and not args.tag_labels:
@@ -271,29 +279,59 @@ def oracle_tag_hits(args, detections, frame_rows, chains):
 
 # ---- stage 5: output -----------------------------------------------------------------------------
 
-def staff_per_frame(detections, chains, staff_chains, hits, frame_count, max_gap):
-    """Per frame: (x, y, chain) of the staff, or None. Short gaps inside a staff chain are interpolated."""
-    tracks = defaultdict(dict)  # chain -> {frame: chest point}
-    for row in np.flatnonzero(np.isin(chains, list(staff_chains))):
-        frame, chain = int(detections["frame"][row]), int(chains[row])
-        # if a chain has two boxes in one frame, keep the more confident one
-        current = tracks[chain].get(frame)
-        if current is None or detections["conf"][row] > current[1]:
-            tracks[chain][frame] = (detections["chest"][row], detections["conf"][row])
+def staff_per_frame(detections, chains, staff_chains, weights, frame_count, max_hold, switch_penalty):
+    """Per frame: (x, y, chain, detection row or None if interpolated) of the staff, or None.
 
-    candidates = defaultdict(list)  # frame -> [(hits, chain, point)]
-    for chain, points in tracks.items():
-        frames = sorted(points)
-        for a, b in zip(frames, frames[1:] + [None]):
-            candidates[a].append((hits[chain], chain, points[a][0]))
-            if b is not None and 1 < b - a <= max_gap:
-                for f in range(a + 1, b):
-                    t = (f - a) / (b - a)
-                    candidates[f].append((hits[chain], chain, (1 - t) * points[a][0] + t * points[b][0]))
+    Every frame with staff-chain detections offers one candidate per staff chain (its most confident box).
+    One path through these candidates is chosen by dynamic programming, minimising the summed jumps between
+    consecutive picks plus switch_penalty px per change of chain, so overlapping staff chains cannot make
+    the output flicker between people. Gaps in the path up to max_hold frames are interpolated; longer gaps
+    are not present (a position is never held without a detection for longer). weights is unused here but
+    kept so callers can pass confirmed / added information.
+    """
+    best = {}  # (frame, chain) -> row
+    for row in np.flatnonzero(np.isin(chains, list(staff_chains))):
+        key = (int(detections["frame"][row]), int(chains[row]))
+        if key not in best or detections["conf"][row] > detections["conf"][best[key]]:
+            best[key] = row
+    per_frame = defaultdict(list)
+    for (frame, chain), row in best.items():
+        per_frame[frame].append((chain, row))
+    frames = sorted(per_frame)
     result = [None] * frame_count
-    for frame, options in candidates.items():
-        _, chain, point = max(options, key=lambda o: o[0])  # most tag evidence wins
-        result[frame] = (float(point[0]), float(point[1]), chain)
+    if not frames:
+        return result
+
+    # dynamic programming over the frames that have candidates
+    costs = [np.zeros(len(per_frame[frames[0]]))]
+    back = [None]
+    for prev_frame, frame in zip(frames, frames[1:]):
+        prev, cur = per_frame[prev_frame], per_frame[frame]
+        prev_points = detections["chest"][[r for _, r in prev]]
+        cur_points = detections["chest"][[r for _, r in cur]]
+        jump = np.linalg.norm(cur_points[:, None, :] - prev_points[None, :, :], axis=2)
+        switch = np.array([[c != p for p, _ in prev] for c, _ in cur], float) * switch_penalty
+        total = costs[-1][None, :] + jump + switch
+        back.append(total.argmin(axis=1))
+        costs.append(total.min(axis=1))
+    k = int(np.argmin(costs[-1]))
+    path = []
+    for i in range(len(frames) - 1, -1, -1):
+        path.append((frames[i], *per_frame[frames[i]][k]))
+        if back[i] is not None:
+            k = int(back[i][k])
+    path.reverse()
+
+    for frame, chain, row in path:
+        x, y = detections["chest"][row]
+        result[frame] = (float(x), float(y), chain, int(row))
+    for (a, chain_a, row_a), (b, _, row_b) in zip(path, path[1:]):
+        if 1 < b - a <= max_hold + 1:
+            pa, pb = detections["chest"][row_a], detections["chest"][row_b]
+            for f in range(a + 1, b):
+                t = (f - a) / (b - a)
+                point = (1 - t) * pa + t * pb
+                result[f] = (float(point[0]), float(point[1]), chain_a, None)
     return result
 
 
@@ -313,22 +351,41 @@ def label(image, text, origin, color, scale=0.5, thickness=1):
     cv2.putText(image, text, origin, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
 
 
-def write_video(path, video, fps, detections, frame_rows, chains, staff):
+def staff_outline(detections, row):
+    """The staff box in the original image: the panorama box mapped back, or the box itself."""
+    box = detections["box"][row]
+    if bool(detections["use_pano"]):
+        return box_outline(box, (tuple(detections["center"]), float(detections["radius"])))
+    x1, y1, x2, y2 = box.astype(int)
+    return np.array([(x1, y1), (x2, y1), (x2, y2), (x1, y2)], np.int32)
+
+
+def write_video(path, video, fps, detections, frame_rows, chains, staff, debug=False):
+    """The staff as a green box with "STAFF" (a thin marker on short interpolated stretches); with debug,
+    every other chain as a grey point with its id."""
     writer = None
     for index, frame in read_video(video):
         if index >= len(frame_rows):
             break
-        staff_chain = staff[index][2] if staff[index] else None
-        for row in frame_rows[index]:
-            if chains[row] == staff_chain:
-                continue
-            x, y = detections["chest"][row].astype(int)
-            cv2.circle(frame, (x, y), 4, OTHER_COLOR, -1)
-            label(frame, str(chains[row]), (x + 6, y - 4), OTHER_COLOR, 0.4)
-        if staff[index]:
-            x, y = round(staff[index][0]), round(staff[index][1])
-            cv2.circle(frame, (x, y), 12, STAFF_COLOR, 3)
-            label(frame, f"STAFF ({staff_chain})", (x + 14, y - 10), STAFF_COLOR, 0.7, 2)
+        entry = staff[index]
+        if debug:
+            for row in frame_rows[index]:
+                if entry and chains[row] == entry[2]:
+                    continue
+                x, y = detections["chest"][row].astype(int)
+                cv2.circle(frame, (x, y), 4, OTHER_COLOR, -1)
+                label(frame, str(chains[row]), (x + 6, y - 4), OTHER_COLOR, 0.4)
+        if entry:
+            x, y = round(entry[0]), round(entry[1])
+            name = f"STAFF ({entry[2]})" if debug else "STAFF"
+            if entry[3] is not None:
+                outline = staff_outline(detections, entry[3])
+                cv2.polylines(frame, [outline], True, STAFF_COLOR, 3)
+                top = outline[outline[:, 1].argmin()]
+                label(frame, name, (int(top[0]) - 30, int(top[1]) - 8), STAFF_COLOR, 0.7, 2)
+            else:  # interpolated for at most max-hold: a light marker, no box
+                cv2.drawMarker(frame, (x, y), STAFF_COLOR, cv2.MARKER_CROSS, 18, 2)
+                label(frame, name, (x + 12, y - 10), STAFF_COLOR, 0.6, 1)
         label(frame, f"frame {index}", (10, 30), (255, 255, 255), 0.8, 2)
         if writer is None:
             h, w = frame.shape[:2]
@@ -406,7 +463,8 @@ def build_chains(args, out, fps, frame_count, timings):
     timings["linking"] = time.perf_counter() - start
     print(f"3. linking: {link_count} links, {track_count} tracks -> {len(set(chains.tolist()))} chains")
     return {"detections": detections, "frame_rows": frame_rows, "keep": keep, "all_rows": all_rows,
-            "hists": hists, "chains": chains, "radius": radius, "frame_count": frame_count, "max_gap": max_gap}
+            "hists": hists, "chains": chains, "radius": radius, "frame_count": frame_count, "max_gap": max_gap,
+            "max_hold": round(args.max_hold * fps), "switch_penalty": args.switch_penalty * radius}
 
 
 def review_scores(args, out, state):
@@ -462,7 +520,7 @@ def main():
     timings = {}
     state = build_chains(args, out, fps, frame_count, timings)
     detections, frame_rows, chains = state["detections"], state["frame_rows"], state["chains"]
-    keep, all_rows, frame_count, max_gap = state["keep"], state["all_rows"], state["frame_count"], state["max_gap"]
+    keep, all_rows, frame_count = state["keep"], state["all_rows"], state["frame_count"]
 
     start = time.perf_counter()
     scored, extra = Counter(), {}
@@ -510,10 +568,11 @@ def main():
               f"top chains (id:hits) {top or 'none'}")
 
     start = time.perf_counter()
-    staff = staff_per_frame(detections, chains, staff_chains, hits, frame_count, max_gap)
+    staff = staff_per_frame(detections, chains, staff_chains, hits, frame_count, state["max_hold"],
+                            state["switch_penalty"])
     write_csv(out / "staff.csv", staff)
     write_timeline(out / "timeline.png", staff, fps)
-    write_video(out / "annotated.mp4", args.video, fps, detections, frame_rows, chains, staff)
+    write_video(out / "annotated.mp4", args.video, fps, detections, frame_rows, chains, staff, args.debug)
     timings["output"] = time.perf_counter() - start
     present = sum(entry is not None for entry in staff)
     print(f"5. output: staff present in {present} of {frame_count} frames -> {out}")

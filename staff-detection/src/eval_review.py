@@ -82,7 +82,8 @@ class Scenario:
 
     def score(self, chains, staff_chains, weights):
         s = self.state
-        staff = staff_per_frame(s["detections"], chains, staff_chains, weights, s["frame_count"], s["max_gap"])
+        staff = staff_per_frame(s["detections"], chains, staff_chains, weights, s["frame_count"], s["max_hold"],
+                                s["switch_penalty"])
         pred = {f: ({"present": "1", "x": str(e[0]), "y": str(e[1])} if e else {"present": "0", "x": "", "y": ""})
                 for f, e in enumerate(staff)}
         metrics = position_metrics(self.gt_rows, pred, s["radius"])
