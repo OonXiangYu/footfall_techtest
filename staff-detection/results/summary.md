@@ -36,5 +36,5 @@ pessimistic. `error_timeline.png` shows the distance per frame and `timeline.png
 
 | view | labelled frames where a box contains the chest point | boxes / frame |
 |---|---|---|
-| original fisheye frame | 15 of 55 (27%) | 2.8 |
-| unwarped panorama | 47 of 55 (86%) | 15.7 |
+| original fisheye frame | 15 of 55 (27.3%) | 2.8 |
+| unwarped panorama | 47 of 55 (85.5%) | 15.7 |

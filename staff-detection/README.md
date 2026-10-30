@@ -61,7 +61,7 @@ This writes `staff.csv`, `annotated.mp4`, `timeline.png` and the caches into `ou
 1. **Detection.** The fisheye frame is unwarped into a panorama (one column per 0.25 degree,
    with the left edge repeated past the right edge so that people on the seam are seen whole).
    YOLOv8n then runs on the panorama (imgsz 1440, conf 0.25). On the original frame the detector
-   finds the staff member on 27% of the labelled frames; on the panorama it finds them on 86%
+   finds the staff member on 27.3% of the labelled frames; on the panorama it finds them on 85.5%
    (`eval\eval_detection.py`).
 2. **Tracking.** A point tracker with a tight gate (0.05 of the fisheye radius per frame)
    follows each person. It breaks tracks rather than swapping people.
