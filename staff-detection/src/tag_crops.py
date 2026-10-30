@@ -85,9 +85,14 @@ def save_sheet(crops, number):
 
 
 # read the video sequentially and yield (frame index, upright crop, used_fallback) every EVERY frames
-def iter_crops(video_path, gt_path, detections_path, scale=SCALE):
+def iter_crops(video_path, gt_path, detections_path, scale=SCALE, frames=None):
+    """frames: the frames to crop (default every EVERY-th frame); frames without a GT chest point are skipped."""
     chest = interpolate_chest(gt_path)
-    last = max(f for f in chest if f % EVERY == 0)
+    if frames is None:
+        wanted = {f for f in chest if f % EVERY == 0}
+    else:
+        wanted = set(frames) & set(chest)
+    last = max(wanted)
     detections = dict(np.load(detections_path))
     frame_rows = rows_per_frame(detections)
     center = tuple(detections["center"])
@@ -97,7 +102,7 @@ def iter_crops(video_path, gt_path, detections_path, scale=SCALE):
         ok, frame = cap.read()
         if not ok:
             break
-        if index in chest and index % EVERY == 0:
+        if index in wanted:
             point, used_fallback = snap_to_detection(np.array(chest[index]), frame_rows[index], detections)
             yield index, upright_crop(frame, tuple(point), center, scale), used_fallback
         index += 1

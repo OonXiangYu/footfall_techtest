@@ -13,6 +13,8 @@ from tag_crops import EVERY, iter_crops
 WINDOW = "label tags"
 DISPLAY_SIZE = 720
 LABEL_KEYS = {ord("y"): "y", ord("n"): "n", ord("u"): "u"}
+DENSE_MARGIN = 10  # frames around each "y" run for --dense
+SPARSE_LABELS = ROOT / "data" / "tag_gt.csv"
 LABEL_COLORS = {"y": (0, 255, 0), "n": (0, 0, 255), "u": (0, 200, 255), None: (200, 200, 200)}
 
 
@@ -21,8 +23,13 @@ def parse_args():
     parser.add_argument("--video", default=str(ROOT / "data" / "sample.mp4"))
     parser.add_argument("--gt", default=str(ROOT / "data" / "gt.csv"))
     parser.add_argument("--detections", default=str(ROOT / "outputs" / "detections.npz"))
-    parser.add_argument("--out", default=str(ROOT / "data" / "tag_gt.csv"))
-    return parser.parse_args()
+    parser.add_argument("--out", help="labels file (default data/tag_gt.csv, or data/tag_gt_dense.csv with --dense)")
+    parser.add_argument("--dense", action="store_true",
+                        help=f"label every frame within +-{DENSE_MARGIN} frames of each 'y' run in data/tag_gt.csv")
+    args = parser.parse_args()
+    if args.out is None:
+        args.out = str(ROOT / "data" / ("tag_gt_dense.csv" if args.dense else "tag_gt.csv"))
+    return args
 
 
 def load_labels(path):
@@ -54,6 +61,25 @@ def runs(frames):
     return [f"{g[0]}-{g[-1]}" if len(g) > 1 else str(g[0]) for g in groups]
 
 
+def y_runs(labels):
+    """Runs of "y" frames in the every-EVERY-frames labels, as [first, last] lists."""
+    groups = []
+    for frame in sorted(f for f, label in labels.items() if label == "y"):
+        if groups and frame - groups[-1][-1] == EVERY:
+            groups[-1][-1] = frame
+        else:
+            groups.append([frame, frame])
+    return groups
+
+
+def dense_frames(sparse_labels):
+    """Every frame within DENSE_MARGIN frames of a "y" run."""
+    frames = set()
+    for first, last in y_runs(sparse_labels):
+        frames.update(range(max(0, first - DENSE_MARGIN), last + DENSE_MARGIN + 1))
+    return frames
+
+
 def render(crop, index, position, count, current, used_fallback):
     image = cv2.resize(crop, (DISPLAY_SIZE, DISPLAY_SIZE), interpolation=cv2.INTER_CUBIC)
     lines = [(f"frame {index}  [{position + 1}/{count}]", (255, 255, 255)),
@@ -73,9 +99,18 @@ def first_unlabelled(crops, labels):
 
 def main():
     args = parse_args()
-    print("Cutting crops...")
-    crops = list(iter_crops(args.video, args.gt, args.detections))
+    frames = None
     labels = load_labels(args.out)
+    if args.dense:
+        sparse = load_labels(SPARSE_LABELS)
+        frames = dense_frames(sparse)
+        if not labels:
+            # start from the every-5-frames labels that fall inside the dense ranges
+            labels = {f: label for f, label in sparse.items() if f in frames}
+            print(f"Dense mode: {len(y_runs(sparse))} y runs -> {len(frames)} frames; "
+                  f"{len(labels)} pre-filled from {SPARSE_LABELS.name}")
+    print("Cutting crops...")
+    crops = list(iter_crops(args.video, args.gt, args.detections, frames=frames))
     position = first_unlabelled(crops, labels)
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
