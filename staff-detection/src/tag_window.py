@@ -84,17 +84,19 @@ def collect_people(args, tag_labels):
     return staff, others
 
 
-def collect_people_cached(args, tag_labels):
-    """collect_people, cached in outputs/ (the pose pass takes a while); rebuilt when inputs change."""
-    key = json.dumps({"files": [(p, Path(p).stat().st_mtime) for p in (args.video, args.gt, args.tag_labels)],
+def collect_people_cached(args, tag_labels, cache=PEOPLE_CACHE):
+    """collect_people, cached (the pose pass takes a while); rebuilt when the video, the GT or the
+    labels (their contents, so merged label sets work too) change."""
+    labels = sorted((int(f), label) for f, label in tag_labels.items())
+    key = json.dumps({"files": [(p, Path(p).stat().st_mtime) for p in (args.video, args.gt)], "labels": labels,
                       "canvas": [CANVAS_X, CANVAS_Y], "other_min_dist": OTHER_MIN_DIST, "weights": POSE_WEIGHTS})
-    if PEOPLE_CACHE.exists():
-        with open(PEOPLE_CACHE, "rb") as f:
+    if Path(cache).exists():
+        with open(cache, "rb") as f:
             cached = pickle.load(f)
         if cached["key"] == key:
             return cached["staff"], cached["others"]
     staff, others = collect_people(args, tag_labels)
-    with open(PEOPLE_CACHE, "wb") as f:
+    with open(cache, "wb") as f:
         pickle.dump({"key": key, "staff": staff, "others": others}, f)
     return staff, others
 

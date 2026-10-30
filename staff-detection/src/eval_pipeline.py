@@ -84,11 +84,14 @@ def staff_chain_report(run, gt):
     detections, chains = np.load(run / "detections.npz"), np.load(run / "chains.npz")
     radius = float(detections["radius"])
     hits = dict(zip(chains["hit_chain"].tolist(), chains["hit_count"].tolist()))
+    # auto runs store summed evidence (log-likelihood ratio) instead of hit counts
+    evidence = dict(zip(chains["hit_chain"].tolist(), chains["evidence"].tolist())) if "evidence" in chains else {}
     # auto runs also store how many frames of each chain were scored, so the hit rate can be shown
     scored = dict(zip(chains["hit_chain"].tolist(), chains["scored_count"].tolist())) if "scored_count" in chains else {}
     gt_points = {f: (float(r["x"]), float(r["y"])) for f, r in gt.items() if r["status"] == "present" and r["x"]}
     print(f"\n{run.name}: staff chains")
-    print(f"{'chain':>7}{'frames':>14}{'tag hits':>10}{'scored':>8}{'on GT point (labelled frames)':>32}")
+    print(f"{'chain':>7}{'frames':>14}{'evidence' if evidence else 'tag hits':>10}{'scored':>8}"
+          f"{'on GT point (labelled frames)':>32}")
     for chain in chains["staff_chain"].tolist():
         rows = np.flatnonzero(chains["chain"] == chain)
         frames = detections["frame"][rows]
@@ -100,7 +103,8 @@ def staff_chain_report(run, gt):
             labelled += 1
             on_point += np.hypot(*(detections["chest"][best] - gt_points[frame])) <= POSITION_TOLERANCE * radius
         scored_text = str(scored[chain]) if scored else "-"
-        print(f"{chain:>7}{f'{frames.min()}-{frames.max()}':>14}{hits[chain]:>10}{scored_text:>8}"
+        tag_text = f"{evidence[chain]:+.2f}" if evidence else str(hits[chain])
+        print(f"{chain:>7}{f'{frames.min()}-{frames.max()}':>14}{tag_text:>10}{scored_text:>8}"
               f"{f'{on_point} of {labelled}':>32}")
 
 

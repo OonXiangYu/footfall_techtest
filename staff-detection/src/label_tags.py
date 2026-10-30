@@ -51,10 +51,12 @@ def save_labels(path, labels):
 
 
 # consecutive y frames (EVERY apart) joined into "start-end" strings
-def runs(frames):
+def runs(frames, step=EVERY):
+    """Labelled frames grouped into "first-last" runs; step = the spacing of labelled frames
+    (EVERY for the sparse labels, 1 for --dense)."""
     groups = []
     for frame in sorted(frames):
-        if groups and frame - groups[-1][-1] == EVERY:
+        if groups and frame - groups[-1][-1] == step:
             groups[-1].append(frame)
         else:
             groups.append([frame])
@@ -134,7 +136,8 @@ def main():
     counts = Counter(labels.values())
     print(f"y: {counts['y']}  n: {counts['n']}  u: {counts['u']}  "
           f"(unlabelled: {len(crops) - len(labels)})")
-    print("Tag visible (y) runs:", ", ".join(runs(f for f, label in labels.items() if label == "y")) or "none")
+    step = 1 if args.dense else EVERY
+    print("Tag visible (y) runs:", ", ".join(runs((f for f, label in labels.items() if label == "y"), step)) or "none")
 
 
 if __name__ == "__main__":
