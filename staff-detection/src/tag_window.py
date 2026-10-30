@@ -17,14 +17,14 @@ from ultralytics import YOLO
 from eval_detection import ROOT
 from eval_tag import print_distributions, print_threshold_table
 from fisheye import to_original_point
-from pose import POSE_WEIGHTS, body_frame, keypoints_to_original, run_pose, staff_owner, to_body
+from pose import (CANVAS_X, CANVAS_Y, POSE_WEIGHTS, body_canvas, body_frame, keypoints_to_original, run_pose,
+                  staff_owner, to_body, to_canvas)
 from tag_crops import interpolate_chest, load_tag_labels
 from tag_match import SCALES, SEARCH_FRACTION, TAG_SIZE, extract_pdf_photo, find_pdf_tag
 
 REVIEW_DIR = ROOT / "outputs" / "tag_review_window"
 PEOPLE_CACHE = ROOT / "outputs" / "tag_people.pkl"
 OTHER_MIN_DIST = 0.2  # other people: box centre farther than this fraction of the radius from the staff
-CANVAS_X, CANVAS_Y = (-2.0, 2.0), (-1.0, 2.5)  # body-canvas extent in shoulder widths
 WINDOW_STD = 2.0  # one window: half-size = WINDOW_STD x the clicks' std ...
 MIN_WINDOW_TAGS = 1.5  # ... but at least this many tag sizes wide/high in total
 SIDE_WINDOW_TAGS = 1.0  # two windows: half-size = this many tag sizes
@@ -51,24 +51,6 @@ def load_tag_positions(path):
     with open(path, newline="") as f:
         return {int(r["frame"]): np.array([float(r["x"]), float(r["y"])])
                 for r in csv.DictReader(f) if r["status"] == "tag"}
-
-
-def body_canvas(frame, body):
-    """Gray image of the body region: x along the shoulders (left -> right), y towards the hips,
-    native resolution (one shoulder width = width px). Returns the image and the width."""
-    origin, x_axis, y_axis, width = body
-    x0, y0 = CANVAS_X[0] * width, CANVAS_Y[0] * width
-    # canvas pixel (u, v) -> original image: origin + (u + x0) * x_axis + (v + y0) * y_axis
-    matrix = np.array([[x_axis[0], y_axis[0], origin[0] + x0 * x_axis[0] + y0 * y_axis[0]],
-                       [x_axis[1], y_axis[1], origin[1] + x0 * x_axis[1] + y0 * y_axis[1]]])
-    size = (round((CANVAS_X[1] - CANVAS_X[0]) * width), round((CANVAS_Y[1] - CANVAS_Y[0]) * width))
-    canvas = cv2.warpAffine(frame, matrix, size, flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-                            borderValue=(0, 0, 0))
-    return cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
-
-
-def to_canvas(point, width):
-    return (point[0] - CANVAS_X[0]) * width, (point[1] - CANVAS_Y[0]) * width
 
 
 def collect_people(args, tag_labels):

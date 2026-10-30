@@ -17,16 +17,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
 from ultralytics import YOLO
 
-from crops import box_chest_point, upright_crop
+from crops import box_chest_point
 from detections import choose_view, detect_people, rows_per_frame
 from fisheye import ANGLE_STEPS, circle_for, owning_box, to_original_point, to_panorama_point
 from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, MAX_LINK_DIST, chain_ids, link_tracks,
                      track_summaries)
+from pose import POSE_WEIGHTS, body_canvas, body_frame, keypoints_to_original, run_pose
 from tag_crops import interpolate_chest
-from tag_match import TAG_SIZE, extract_pdf_photo, find_pdf_tag, match, template_variants
+from tag_model import load_tag_model, tag_probability
 from tracker import Tracker
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,8 +46,8 @@ def parse_args():
     parser.add_argument("--tag-labels", help="tag_gt.csv (y/n/u per frame), required for --tag oracle")
     parser.add_argument("--gt", default=str(ROOT / "data" / "gt.csv"),
                         help="hand-labelled chest points; --tag oracle uses them to locate the tag")
-    parser.add_argument("--pdf", default=str(ROOT / "data" / "AI Evaluation Test.pdf"),
-                        help="task PDF; --tag auto takes its tag template from the first photo")
+    parser.add_argument("--tag-model", default=str(ROOT / "models" / "tag_classifier.npz"),
+                        help="--tag auto: tag classifier from tag_classifier.py")
     parser.add_argument("--imgsz", type=int, default=1440)
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--max-dist", type=float, default=0.05,
@@ -60,7 +62,12 @@ def parse_args():
                         help="cap on the link distance, fraction of the radius")
     parser.add_argument("--link-ratio", type=float, default=LINK_RATIO,
                         help="ratio test for links: only link when clearly the best option; 0 turns it off")
-    parser.add_argument("--tag-threshold", type=float, default=0.80, help="--tag auto: template score for a hit")
+    parser.add_argument("--tag-threshold", type=float, default=None,
+                        help="--tag auto: classifier probability for a hit (default: the model's operating point)")
+    parser.add_argument("--background", type=float, default=None,
+                        help="--tag auto: hit rate of non-staff people (default: measured, stored in the model)")
+    parser.add_argument("--rate-ratio", type=float, default=2.0,
+                        help="--tag auto: a staff chain's hit rate must be this many times the background rate")
     parser.add_argument("--tag-every", type=int, default=5, help="--tag auto: score tags every N frames")
     parser.add_argument("--min-hits", type=int, default=2, help="tag hits for a chain to count as staff")
     args = parser.parse_args()
@@ -160,25 +167,48 @@ def link(detections, track_ids, max_gap, speed, margin, max_distance, ratio=None
 
 # ---- stage 4: tag evidence -----------------------------------------------------------------------
 
-def tag_template(pdf_path):
-    pdf_tag, _ = find_pdf_tag(extract_pdf_photo(Path(pdf_path)))
-    return cv2.resize(pdf_tag, TAG_SIZE, interpolation=cv2.INTER_AREA)
+POSE_MATCH_IOU = 0.3  # a pose box belongs to a detector box if they overlap at least this much
 
 
-def auto_tag_hits(args, detections, frame_rows, chains):
-    """Template-match the upright chest crop of every detection, every tag_every frames."""
-    variants = template_variants(tag_template(args.pdf))
-    center = tuple(detections["center"])
-    hits = Counter()
-    for index, frame in tqdm(read_video(args.video), total=len(frame_rows), desc="Tag matching"):
+def box_iou(a, b):
+    width = min(a[2], b[2]) - max(a[0], b[0])
+    height = min(a[3], b[3]) - max(a[1], b[1])
+    if width <= 0 or height <= 0:
+        return 0.0
+    inter = width * height
+    return inter / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
+
+
+def match_poses(det_boxes, pose_boxes):
+    """{detection index: pose index}, one-to-one by IoU (Hungarian), IoU >= POSE_MATCH_IOU."""
+    if len(det_boxes) == 0 or len(pose_boxes) == 0:
+        return {}
+    iou = np.array([[box_iou(d, p) for p in pose_boxes] for d in det_boxes])
+    rows, cols = linear_sum_assignment(-iou)
+    return {r: c for r, c in zip(rows, cols) if iou[r, c] >= POSE_MATCH_IOU}
+
+
+def auto_tag_hits(args, detections, frame_rows, chains, model, threshold):
+    """Every tag_every frames: pose on the panorama, matched to the detector's boxes; each matched
+    person's two shoulder-placed tag windows are scored by the classifier. Returns per chain
+    (hits, frames scored)."""
+    pose_model = YOLO(str(ROOT / POSE_WEIGHTS))
+    center, radius = tuple(detections["center"]), float(detections["radius"])
+    hits, scored = Counter(), Counter()
+    for index, frame in tqdm(read_video(args.video), total=len(frame_rows), desc="Tag scoring"):
         if index % args.tag_every or index >= len(frame_rows):
             continue
-        for row in frame_rows[index]:
-            crop = upright_crop(frame, tuple(detections["chest"][row]), center, scale=1)
-            score = match(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), variants)[0]
-            if score >= args.tag_threshold:
-                hits[int(chains[row])] += 1
-    return hits
+        rows = frame_rows[index]
+        pose_boxes, keypoints, confs = run_pose(pose_model, frame, center, radius)
+        for det, pose in match_poses(detections["box"][rows], pose_boxes).items():
+            body = body_frame(keypoints_to_original(keypoints[pose], center, radius), confs[pose])
+            if body is None:
+                continue
+            chain = int(chains[rows[det]])
+            scored[chain] += 1
+            if tag_probability(model, body_canvas(frame, body), body[3]) >= threshold:
+                hits[chain] += 1
+    return hits, scored
 
 
 def load_tag_labels(path):
@@ -329,18 +359,27 @@ def main():
     print(f"3. linking: {link_count} links, {track_count} tracks -> {len(set(chains.tolist()))} chains")
 
     start = time.perf_counter()
+    scored = Counter()
     if args.tag == "auto":
-        hits = auto_tag_hits(args, detections, frame_rows, chains)
+        model = load_tag_model(args.tag_model)
+        threshold = args.tag_threshold if args.tag_threshold is not None else float(model["threshold"])
+        background = args.background if args.background is not None else float(model["background"])
+        print(f"   tag classifier: hit if p >= {threshold}; background rate {background:.1%}; staff chain needs "
+              f">= {args.min_hits} hits and a hit rate >= {args.rate_ratio * background:.1%}")
+        hits, scored = auto_tag_hits(args, detections, frame_rows, chains, model, threshold)
+        staff_chains = {chain for chain, count in hits.items()
+                        if count >= args.min_hits and count / scored[chain] >= args.rate_ratio * background}
     else:
         hits = oracle_tag_hits(args, detections, frame_rows, chains)
-    staff_chains = {chain for chain, count in hits.items() if count >= args.min_hits}
+        staff_chains = {chain for chain, count in hits.items() if count >= args.min_hits}
     timings["tag evidence"] = time.perf_counter() - start
     # chain of every detection row plus the tag evidence, for per-chain evaluation
+    extra = {"scored_count": np.array([scored[c] for c in hits], int)} if scored else {}
     np.savez(out / "chains.npz", chain=chains, hit_chain=np.array(list(hits), int),
-             hit_count=np.array(list(hits.values()), int), staff_chain=np.array(sorted(staff_chains), int))
-    top = ", ".join(f"{c}:{n}" for c, n in hits.most_common(8))
+             hit_count=np.array(list(hits.values()), int), staff_chain=np.array(sorted(staff_chains), int), **extra)
+    top = ", ".join(f"{c}:{n}" + (f"/{scored[c]}" if scored else "") for c, n in hits.most_common(8))
     print(f"4. tag evidence ({args.tag}): {len(staff_chains)} staff chain(s) with >= {args.min_hits} hits; "
-          f"top chains (id:hits) {top or 'none'}")
+          f"top chains (id:hits{'/scored' if scored else ''}) {top or 'none'}")
 
     start = time.perf_counter()
     staff = staff_per_frame(detections, chains, staff_chains, hits, frame_count, max_gap)

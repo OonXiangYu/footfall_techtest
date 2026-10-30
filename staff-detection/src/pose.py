@@ -1,5 +1,6 @@
 """Pose (yolov8n-pose) on the seam-padded panorama, and a body frame built from the shoulders."""
 
+import cv2
 import numpy as np
 
 from fisheye import ANGLE_STEPS, merge_seam_tracks, owning_box, pad_seam, to_original_point, to_panorama_point, unwarp
@@ -9,6 +10,7 @@ IMGSZ = 1440
 LEFT_SHOULDER, RIGHT_SHOULDER = 5, 6  # COCO keypoint indices, as the model names them
 LEFT_HIP, RIGHT_HIP = 11, 12
 KEYPOINT_CONF = 0.5
+CANVAS_X, CANVAS_Y = (-2.0, 2.0), (-1.0, 2.5)  # body-canvas extent in shoulder widths
 
 
 def run_pose(model, frame, center, radius):
@@ -68,3 +70,21 @@ def from_body(point, frame):
     """Body coordinates -> original-image point."""
     origin, x_axis, y_axis, width = frame
     return origin + width * (point[0] * x_axis + point[1] * y_axis)
+
+
+def body_canvas(frame, body):
+    """Gray image of the body region: x along the shoulders (left -> right), y towards the hips,
+    native resolution (one shoulder width = width px). Returns the image and the width."""
+    origin, x_axis, y_axis, width = body
+    x0, y0 = CANVAS_X[0] * width, CANVAS_Y[0] * width
+    # canvas pixel (u, v) -> original image: origin + (u + x0) * x_axis + (v + y0) * y_axis
+    matrix = np.array([[x_axis[0], y_axis[0], origin[0] + x0 * x_axis[0] + y0 * y_axis[0]],
+                       [x_axis[1], y_axis[1], origin[1] + x0 * x_axis[1] + y0 * y_axis[1]]])
+    size = (round((CANVAS_X[1] - CANVAS_X[0]) * width), round((CANVAS_Y[1] - CANVAS_Y[0]) * width))
+    canvas = cv2.warpAffine(frame, matrix, size, flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                            borderValue=(0, 0, 0))
+    return cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
+
+
+def to_canvas(point, width):
+    return (point[0] - CANVAS_X[0]) * width, (point[1] - CANVAS_Y[0]) * width
