@@ -19,6 +19,9 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Circle
 import numpy as np
 from tqdm import tqdm
 from ultralytics import YOLO
@@ -117,6 +120,13 @@ def video_info(path):
     info = (cap.get(cv2.CAP_PROP_FPS), int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
     cap.release()
     return info
+
+
+def frame_size(path):
+    cap = cv2.VideoCapture(path)
+    size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    cap.release()
+    return size
 
 
 def read_video(path):
@@ -332,9 +342,17 @@ def staff_outline(detections, row):
     return np.array([(x1, y1), (x2, y1), (x2, y2), (x1, y2)], np.int32)
 
 
+def staff_label(image, text, origin, scale, thickness):
+    """The staff label, moved inside the frame when the person is near an edge."""
+    (width, height), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+    x = min(max(origin[0], 4), image.shape[1] - width - 4)
+    y = min(max(origin[1], height + 4), image.shape[0] - 4)
+    label(image, text, (x, y), STAFF_COLOR, scale, thickness)
+
+
 def write_video(path, video, fps, detections, frame_rows, chains, staff, debug=False):
-    """The staff as a green box with "STAFF" (a thin marker on short interpolated stretches); with debug,
-    every other chain as a grey point with its id."""
+    """The staff as a green box labelled "STAFF (x, y)" with the position in original-image pixels (a thin
+    marker on short interpolated stretches); with debug, every other chain as a grey point with its id."""
     writer = None
     for index, frame in read_video(video):
         if index >= len(frame_rows):
@@ -348,16 +366,17 @@ def write_video(path, video, fps, detections, frame_rows, chains, staff, debug=F
                 cv2.circle(frame, (x, y), 4, OTHER_COLOR, -1)
                 label(frame, str(chains[row]), (x + 6, y - 4), OTHER_COLOR, 0.4)
         if entry:
+            # the position as in staff.csv: original-image pixels of the chest point
             x, y = round(entry[0]), round(entry[1])
-            name = f"STAFF ({entry[2]})" if debug else "STAFF"
+            name = f"STAFF ({x}, {y})" + (f" chain {entry[2]}" if debug else "")
             if entry[3] is not None:
                 outline = staff_outline(detections, entry[3])
                 cv2.polylines(frame, [outline], True, STAFF_COLOR, 3)
                 top = outline[outline[:, 1].argmin()]
-                label(frame, name, (int(top[0]) - 30, int(top[1]) - 8), STAFF_COLOR, 0.7, 2)
+                staff_label(frame, name, (int(top[0]) - 70, int(top[1]) - 8), 0.7, 2)
             else:  # interpolated for at most max-hold: a light marker, no box
                 cv2.drawMarker(frame, (x, y), STAFF_COLOR, cv2.MARKER_CROSS, 18, 2)
-                label(frame, name, (x + 12, y - 10), STAFF_COLOR, 0.6, 1)
+                staff_label(frame, name, (x + 12, y - 10), 0.6, 1)
         label(frame, f"frame {index}", (10, 30), (255, 255, 255), 0.8, 2)
         if writer is None:
             h, w = frame.shape[:2]
@@ -375,6 +394,81 @@ def write_timeline(path, staff, fps):
     ax.set_xlabel(f"frame ({fps:.0f} fps)", color="#52514e")
     ax.set_title(f"Staff presence: {int(present.sum())} of {len(present)} frames", loc="left", fontsize=11)
     ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120, facecolor="#fcfcfb")
+    plt.close(fig)
+
+
+def frame_ranges(frames):
+    """Sorted frame numbers grouped into consecutive (first, last) ranges."""
+    groups = []
+    for f in frames:
+        if groups and f == groups[-1][1] + 1:
+            groups[-1][1] = f
+        else:
+            groups.append([f, f])
+    return [tuple(g) for g in groups]
+
+
+def ranges_text(staff, fps):
+    """The frames where the staff member is present (and not found), as ranges, with the totals."""
+    present = [f for f, entry in enumerate(staff) if entry is not None]
+    absent = [f for f, entry in enumerate(staff) if entry is None]
+    fmt = lambda groups: ", ".join(f"{a}-{b}" if a != b else str(a) for a, b in groups) or "none"  # noqa: E731
+    return (f"present: {fmt(frame_ranges(present))}\n"
+            f"total: {len(present)} of {len(staff)} frames ({len(present) / len(staff):.1%}; "
+            f"{len(present) / fps:.1f} of {len(staff) / fps:.1f} s at {fps:.0f} fps)\n"
+            f"not found: {fmt(frame_ranges(absent))}\n")
+
+
+def write_trajectory(path, staff, fps, center, radius, size):
+    """The staff path in original-image pixels on a blank background with the fisheye circle, coloured by time;
+    gaps where the staff member is not found are dotted grey with their frames."""
+    width, height = size
+    fig, ax = plt.subplots(figsize=(8.4, 6.6))
+    ax.add_patch(Circle(center, radius, fill=False, color="#b4b2a9", linewidth=1))
+    cmap = LinearSegmentedColormap.from_list("time", plt.get_cmap("Blues")(np.linspace(0.35, 1.0, 256)))
+    norm = plt.Normalize(0, (len(staff) - 1) / fps)
+    segments, times = [], []
+    for f in range(1, len(staff)):
+        if staff[f] is not None and staff[f - 1] is not None:
+            segments.append([staff[f - 1][:2], staff[f][:2]])
+            times.append(f / fps)
+    lines = LineCollection(segments, cmap=cmap, norm=norm, linewidth=2)
+    lines.set_array(np.array(times))
+    ax.add_collection(lines)
+    gaps = frame_ranges([f for f, entry in enumerate(staff) if entry is None])
+    for first, last in gaps:
+        before = staff[first - 1] if first > 0 else None
+        after = staff[last + 1] if last + 1 < len(staff) else None
+        ends = [e[:2] for e in (before, after) if e is not None]
+        if len(ends) == 2:
+            ax.plot(*zip(*ends), color="#7a7974", linestyle=":", linewidth=1.5)
+        for x, y in ends:
+            ax.plot(x, y, "o", markersize=6, markerfacecolor="white", markeredgecolor="#52514e")
+    # gaps are numbered on the plot (staggered, several can start at the same desk) and listed in a box
+    for number, (first, last) in enumerate(gaps, 1):
+        before = staff[first - 1] if first > 0 else staff[last + 1]
+        ax.annotate(str(number), before[:2], xytext=(-14, 10 + 10 * ((number - 1) % 4)), textcoords="offset points",
+                    fontsize=8, color="#52514e", fontweight="bold")
+    if gaps:
+        listing = "\n".join(f"{n}: frames {a}-{b} ({(b - a + 1) / fps:.1f} s)" for n, (a, b) in enumerate(gaps, 1))
+        ax.text(0.99, 0.02, "not found\n" + listing, transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5,
+                color="#52514e", bbox={"facecolor": "white", "edgecolor": "#d3d1c7", "boxstyle": "round"})
+    present = [entry for entry in staff if entry is not None]
+    for entry, text in ((present[0], "start"), (present[-1], "end")):
+        ax.plot(entry[0], entry[1], "s", markersize=7, color="#2c2c2a")
+        ax.annotate(text, entry[:2], xytext=(6, -10), textcoords="offset points", fontsize=8, color="#2c2c2a")
+    ax.plot([], [], color="#7a7974", linestyle=":", label="not found (gap; open circles: last / next position)")
+    ax.legend(loc="lower left", fontsize=8, frameon=False)
+    fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.04, label="time (s)")
+    ax.set_xlim(0, width)
+    ax.set_ylim(height, 0)  # image coordinates: y down
+    ax.set_aspect("equal")
+    ax.set_xlabel("x (px, original image)", color="#52514e")
+    ax.set_ylabel("y (px, original image)", color="#52514e")
+    ax.set_title(f"Staff path: present in {len(present)} of {len(staff)} frames, {len(gaps)} gap(s)", loc="left",
+                 fontsize=11)
     fig.tight_layout()
     fig.savefig(path, dpi=120, facecolor="#fcfcfb")
     plt.close(fig)
@@ -538,6 +632,10 @@ def main():
                             state["switch_penalty"])
     write_csv(out / "staff.csv", staff)
     write_timeline(out / "timeline.png", staff, fps)
+    write_trajectory(out / "trajectory.png", staff, fps, tuple(detections["center"]), float(detections["radius"]),
+                     frame_size(args.video))
+    ranges = ranges_text(staff, fps)
+    (out / "staff_ranges.txt").write_text(ranges, encoding="utf-8")
     write_video(out / "annotated.mp4", args.video, fps, detections, frame_rows, chains, staff, args.debug)
     timings["output"] = time.perf_counter() - start
     present = sum(entry is not None for entry in staff)
@@ -545,6 +643,7 @@ def main():
 
     print("\nStage timings: " + ", ".join(f"{name} {seconds:.1f} s" for name, seconds in timings.items())
           + f", total {sum(timings.values()):.1f} s")
+    print(f"\nStaff frames (also in {out / 'staff_ranges.txt'}):\n{ranges}", end="")
 
 
 if __name__ == "__main__":

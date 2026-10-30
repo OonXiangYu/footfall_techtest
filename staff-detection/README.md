@@ -1,8 +1,14 @@
 # Staff detection in overhead fisheye video
 
-Finds the staff member (the person wearing the name tag) in an overhead fisheye video and writes,
-for every frame, whether they are present and where (`staff.csv`), plus an annotated video and a
-presence timeline.
+Finds the staff member (the person wearing the name tag) in an overhead fisheye video and answers,
+for every frame, whether they are present and where:
+
+- `staff.csv`: `frame, present, x, y, chain` for every frame (x, y in original-image pixels);
+- `staff_ranges.txt`: the frames where the staff member is present, as ranges, with the total,
+  and the frames where they are not found (also printed at the end of the run);
+- `trajectory.png`: their path over the whole video, coloured by time, with the gaps marked;
+- `annotated.mp4`: the video with the staff member boxed and labelled `STAFF (x, y)`;
+- `timeline.png`: presence over time.
 
 **Not included:** the sample video and the task brief are company material and are not in this
 repository. The hand labels (`data/*.csv`), the trained tag model, the confirmations and the
@@ -53,7 +59,8 @@ Put the sample video at `data\sample.mp4`. The confirmations from the final revi
 .venv\Scripts\python.exe src\staff_detect.py --video data\sample.mp4 --out outputs\final --confirmed examples\sample_confirmed.json --no-review
 ```
 
-This writes `staff.csv`, `annotated.mp4`, `timeline.png` and the caches into `outputs\final`.
+This writes `staff.csv`, `staff_ranges.txt`, `trajectory.png`, `annotated.mp4`, `timeline.png`
+and the caches into `outputs\final`.
 `staff.csv` is identical to `results\staff.csv`. To reproduce this run and every evaluation number
 with one command, see [Evaluation](#evaluation).
 
@@ -98,7 +105,8 @@ mode a person confirms the staff member once, on a review page, and everything e
      height in pixels if the automatic fit does not suit your screen.
 
    The confirmations are saved to `outputs\run_review\confirmed.json`, and the run finishes with
-   `staff.csv`, `annotated.mp4` and `timeline.png` in the same folder.
+   `staff.csv`, `staff_ranges.txt`, `trajectory.png`, `annotated.mp4` and `timeline.png` in the
+   same folder.
 
 2. **Continue a review** from earlier confirmations (they open already selected), or add
    `--no-review` to reuse them without the page, e.g. after changing settings:
@@ -142,6 +150,10 @@ The per-frame figures use the hand-labelled chest point, interpolated between th
 frames (about one per second).
 
 - `results\staff.csv`: `frame, present, x, y, chain` for every frame (x, y in original pixels).
+- `results\staff_ranges.txt`: present in frames 0-245, 268-818, 841-1282 and 1311-1331, which
+  is 1260 of 1341 frames (94.0%). The staff member is not found in four gaps of 0.4-1.1 s.
+- `results\trajectory.png`: the path over the whole video on a blank background with the fisheye
+  circle, coloured by time. The gaps are dotted and numbered.
 - `results\timeline.png`: presence over time.
 - `results\error_timeline.png`: distance to the labelled point per frame.
 - `results\summary.md`: the numbers in one place.
@@ -225,7 +237,8 @@ data/       hand labels: gt.csv (chest point ~1 per second), tag_gt.csv / tag_gt
             (tag visibility), tag_pos.csv (tag centres) for the sample video
 models/     tag_classifier.npz (the tag model that ranks review candidates)
 examples/   sample_confirmed.json (the final review's confirmations)
-results/    staff.csv, plots and summary.md of the final run; decisions.md / .csv / .png
+results/    staff.csv, staff_ranges.txt, plots (timeline, trajectory, error) and summary.md of the
+            final run; decisions.md / .csv / .png
 outputs/    run folders (not in git)
 ```
 
