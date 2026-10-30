@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from eval_detection import ROOT
-from eval_own_tracker import rows_per_frame
+from detections import rows_per_frame
 from tag_crops import EVERY, box_chest_point, interpolate_chest, snap_to_detection, upright_crop
 from tag_detect import chest_square, kernel_for_tag, measure_tag_size, tag_score
 

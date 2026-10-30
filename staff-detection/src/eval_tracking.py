@@ -6,9 +6,9 @@ import numpy as np
 from tqdm import tqdm
 from ultralytics import YOLO
 
-from eval_detection import (ANGLE_STEPS, DEFAULT_IMGSZ, ROOT, fallback_circle, find_fisheye_circle,
-                            load_gt_points, merge_seam_boxes, pad_seam, read_frames,
-                            to_panorama_point, unwarp)
+from eval_detection import DEFAULT_IMGSZ, ROOT, load_gt_points, read_frames
+from fisheye import (ANGLE_STEPS, fallback_circle, find_fisheye_circle, merge_seam_tracks, owning_box, pad_seam,
+                     to_panorama_point, unwarp)
 
 FIRST_FRAME, LAST_FRAME = 300, 600
 SETTINGS = [  # (name, conf, tracker config)
@@ -26,19 +26,6 @@ def parse_args():
     parser.add_argument("--gt", default=str(ROOT / "data" / "gt.csv"))
     return parser.parse_args()
 
-# after merging the boxes only the box be return, so this is the function to get back the id
-def merge_seam_tracks(boxes, ids, pano_width):
-    merged = merge_seam_boxes(boxes, pano_width)
-    shift = np.array([pano_width, 0, pano_width, 0])
-    merged_ids = []
-    for box in merged:
-        # a merged box is either an original box or one shifted back out of the padding.
-        match = np.flatnonzero(np.all(np.isclose(boxes, box), axis=1) |
-                               np.all(np.isclose(boxes - shift, box), axis=1))
-        merged_ids.append(int(ids[match[0]]))
-    return merged, merged_ids
-
-
 def track_frame(model, frame, circle, conf, tracker, seam_pad):
     pano = unwarp(frame, *circle)
     image = pad_seam(pano) if seam_pad else pano
@@ -54,12 +41,8 @@ def track_frame(model, frame, circle, conf, tracker, seam_pad):
 
 # gwtting back the staff id
 def staff_track_id(point, boxes, ids, wrap_width=None):
-    candidates = [point] if wrap_width is None else [point, (point[0] + wrap_width, point[1])]
-    containing = [(np.hypot((x1 + x2) / 2 - x, (y1 + y2) / 2 - y), track_id)
-                  for x, y in candidates
-                  for (x1, y1, x2, y2), track_id in zip(boxes, ids)
-                  if x1 <= x <= x2 and y1 <= y <= y2]
-    return min(containing)[1] if containing else None
+    index = owning_box(point, boxes, wrap_width)
+    return None if index is None else ids[index]
 
 
 def id_color(track_id):

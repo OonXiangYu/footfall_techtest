@@ -6,7 +6,9 @@ from collections import Counter, deque
 import cv2
 import numpy as np
 
-from eval_detection import ANGLE_STEPS, ROOT, load_gt_points, to_panorama_point
+from detections import rows_per_frame
+from eval_detection import ROOT, load_gt_points
+from fisheye import ANGLE_STEPS, to_panorama_point
 from eval_tracking import count_id_changes, id_color, staff_track_id
 from tracker import Tracker
 
@@ -34,14 +36,6 @@ def staff_speed(gt_points):
     frames = sorted(gt_points)
     speeds = [np.hypot(*np.subtract(gt_points[b], gt_points[a])) / (b - a) for a, b in zip(frames, frames[1:])]
     return float(np.median(speeds)), float(np.max(speeds))
-
-
-# detection row indices for each frame (rows are stored in frame order)
-def rows_per_frame(detections):
-    frame_of_row = detections["frame"]
-    frame_count = int(detections["frame_count"])
-    bounds = np.searchsorted(frame_of_row, np.arange(frame_count + 1))
-    return [np.arange(bounds[f], bounds[f + 1]) for f in range(frame_count)]
 
 
 # run the tracker over every frame; returns the track id of every detection row

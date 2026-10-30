@@ -4,9 +4,10 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from eval_detection import (ANGLE_STEPS, DEFAULT_CONF, DEFAULT_IMGSZ, ROOT, detect_view,
-                            fallback_circle, find_fisheye_circle, load_gt_points, read_frames,
-                            to_original_point, to_panorama_point)
+from detections import detect_view
+from eval_detection import DEFAULT_CONF, DEFAULT_IMGSZ, ROOT, load_gt_points, read_frames
+from fisheye import (ANGLE_STEPS, fallback_circle, find_fisheye_circle, owning_box, to_original_point,
+                     to_panorama_point)
 
 OUT_DIR = ROOT / "outputs" / "backmap"
 SAMPLE_COUNT = 8
@@ -25,11 +26,8 @@ def check_round_trip(gt_points, circle):
 
 # check the staff box
 def staff_box(point, boxes):
-    containing = [b for b in boxes for px in (point[0], point[0] + ANGLE_STEPS)
-                  if b[0] <= px <= b[2] and b[1] <= point[1] <= b[3]]
-    if not containing:
-        return None
-    return min(containing, key=lambda b: math.hypot((b[0] + b[2]) / 2 - point[0], (b[1] + b[3]) / 2 - point[1]))
+    index = owning_box(point, boxes, ANGLE_STEPS)
+    return None if index is None else boxes[index]
 
 # convert the boxes on the unwarp img to the ori img
 def box_outline(box, circle, steps=20):

@@ -8,9 +8,9 @@ import numpy as np
 from tqdm import tqdm
 from ultralytics import YOLO
 
-from eval_detection import (DEFAULT_CONF, DEFAULT_IMGSZ, ROOT, fallback_circle, find_fisheye_circle,
-                            pad_seam, to_original_point, unwarp)
-from eval_tracking import merge_seam_tracks
+from detections import detect_people
+from eval_detection import DEFAULT_CONF, DEFAULT_IMGSZ, ROOT
+from fisheye import fallback_circle, find_fisheye_circle, to_original_point
 
 
 def parse_args():
@@ -22,13 +22,7 @@ def parse_args():
 
 # panorama boxes (seam-merged) and their confidences for one frame
 def detect_frame(model, frame, circle):
-    pano = unwarp(frame, *circle)
-    result = model(pad_seam(pano), classes=[0], imgsz=DEFAULT_IMGSZ, conf=DEFAULT_CONF, verbose=False)[0]
-    boxes = result.boxes.xyxy.cpu().numpy()
-    confs = result.boxes.conf.cpu().numpy()
-    # row indices stand in for track IDs, so we learn which original rows survived the merge
-    boxes, rows = merge_seam_tracks(boxes, list(range(len(boxes))), pano.shape[1])
-    return boxes, confs[rows]
+    return detect_people(model, frame, circle, True, DEFAULT_IMGSZ, DEFAULT_CONF)
 
 
 def main():
