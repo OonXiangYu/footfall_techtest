@@ -18,13 +18,20 @@ def box_chest_point(box, center, radius):
     return np.array(to_original_point((x1 + x2) / 2, y1 + CHEST_HEIGHT * (y2 - y1), center, radius))
 
 
-# 160x160 crop centred on the point, rotated so the centre->point direction points up
-def upright_crop(frame, point, center, scale=SCALE):
+# affine transform original image -> 160x160 crop centred on the point, centre->point direction up
+def upright_matrix(point, center):
     # direction angle measured clockwise on screen (image y points down); up is -90 degrees.
     # getRotationMatrix2D turns counter-clockwise on screen, so turning by angle + 90 sends it up.
+    point = (float(point[0]), float(point[1]))
     angle = math.degrees(math.atan2(point[1] - center[1], point[0] - center[0]))
     matrix = cv2.getRotationMatrix2D(point, angle + 90, 1.0)
     matrix[:, 2] += (CROP / 2 - point[0], CROP / 2 - point[1])  # move the point to the crop centre
+    return matrix
+
+
+# 160x160 crop centred on the point, rotated so the centre->point direction points up
+def upright_crop(frame, point, center, scale=SCALE):
+    matrix = upright_matrix(point, center)
     crop = cv2.warpAffine(frame, matrix, (CROP, CROP), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
     if scale == 1:
         return crop

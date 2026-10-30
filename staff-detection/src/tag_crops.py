@@ -48,6 +48,26 @@ def snap_to_detection(guess, rows, detections):
     return guess, True
 
 
+def load_tag_labels(path):
+    with open(path, newline="") as f:
+        return {int(row["frame"]): row["label"] for row in csv.DictReader(f)}
+
+
+# tag-labelled frames whose crop centre came from a detection box: {frame: (label, chest point)}
+def detection_centred_frames(tag_labels_path, gt_path, detections_path, labels=("y", "n")):
+    tag_labels = load_tag_labels(tag_labels_path)
+    detections = dict(np.load(detections_path))
+    frame_rows = rows_per_frame(detections)
+    chest = interpolate_chest(gt_path)
+    frames = {}
+    for frame, label in tag_labels.items():
+        if label in labels and frame in chest:
+            point, used_fallback = snap_to_detection(np.array(chest[frame]), frame_rows[frame], detections)
+            if not used_fallback:
+                frames[frame] = (label, point)
+    return frames
+
+
 def label(crop, index, used_fallback):
     cv2.putText(crop, str(index), (6, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4, cv2.LINE_AA)
     cv2.putText(crop, str(index), (6, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
