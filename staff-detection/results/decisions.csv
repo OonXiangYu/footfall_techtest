@@ -12,3 +12,5 @@ number,decision,alternative,default,metric,alternative_value,default_value
 5,duplicate-box removal,off,on,"chain on the seated stretch (frames 0-347), frames",229,348
 6,final result,,sample_confirmed.json,hits of 55,,50
 6,final result,,sample_confirmed.json,median error (px),,15.6
+7,oracle (hand tag labels),,tag_gt.csv,hits of 55,,17
+7,oracle (hand tag labels),,tag_gt.csv,median error (px),,16.1

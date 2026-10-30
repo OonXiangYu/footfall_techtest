@@ -11,10 +11,13 @@ with one bar chart per decision in results/decisions.png.
 5. duplicate-box removal: off vs on                      (chain purity, staff chain changes, the chain on the
                                                           seated stretch)
 6. final result with examples/sample_confirmed.json      (hits of 55, median error)
+7. oracle reference: --tag oracle with data/tag_gt.csv  (hits of 55, median error)
 
-1-2 run the detector on the 55 labelled frames (as eval_detection.py). 3-6 run the pipeline's stages with
+1-2 run the detector on the 55 labelled frames (as eval_detection.py). 3-7 run the pipeline's stages with
 the alternative passed as a staff_detect.py flag (--max-dist, --link-ratio 0, --keep-duplicates), reusing
 the detection and appearance caches in --run (made on the first run if missing, about 4 minutes).
+7 marks as staff every chain with at least --min-hits (2) hand-labelled tag sightings, as
+staff_detect.py --tag oracle does.
 A staff hit: a box contains the labelled chest point. Purity and changes are on the labelled frames, where
 the staff track / chain is the one whose box owns the labelled point (as eval_linking.py).
 """
@@ -41,9 +44,11 @@ from eval_linking import count_id_changes, staff_ids_at_gt, track_purity
 from eval_run import position_metrics, read_rows
 from fisheye import circle_for
 from labels import DATA, ROOT, load_gt_points
-from staff_detect import build_chains, parse_args as pipeline_args, review_staff, staff_per_frame, video_info
+from staff_detect import (build_chains, oracle_tag_hits, parse_args as pipeline_args, review_staff, staff_per_frame,
+                          video_info)
 
 CONFIRMED = ROOT / "examples" / "sample_confirmed.json"
+TAG_LABELS = DATA / "tag_gt.csv"  # hand tag labels (y / n / u, every 5th frame) for the oracle reference
 LOW_CONF = 0.10
 WIDE_GATE = 0.20
 SEATED = (0, 347)  # the staff member sits at the desk for these frames at the start of the sample video
@@ -162,17 +167,28 @@ def pipeline_rows(args, gt_points):
     with contextlib.redirect_stdout(io.StringIO()):
         confirmed_args = pipeline_args(base + ["--confirmed", str(CONFIRMED), "--no-review"])
         chains, staff_chains, weights = review_staff(confirmed_args, run, fps, default)
-        staff = staff_per_frame(default["detections"], chains, staff_chains, weights, default["frame_count"],
-                                default["max_hold"], default["switch_penalty"])
+    rows += result_rows(6, "final result", CONFIRMED.name, default, chains, staff_chains, weights, args.gt)
+
+    # 7: the oracle reference: staff chains from the hand tag labels (as staff_detect.py --tag oracle)
+    oracle_args = pipeline_args(base + ["--tag", "oracle", "--tag-labels", str(TAG_LABELS)])
+    hits = oracle_tag_hits(oracle_args, default["detections"], default["frame_rows"], default["chains"])
+    staff_chains = {chain for chain, count in hits.items() if count >= oracle_args.min_hits}
+    rows += result_rows(7, "oracle (hand tag labels)", TAG_LABELS.name, default, default["chains"], staff_chains,
+                        hits, args.gt)
+    return rows
+
+
+def result_rows(number, decision, setting, state, chains, staff_chains, weights, gt_path):
+    """Hits and median error of the staff path through the given staff chains, on the labelled frames."""
+    staff = staff_per_frame(state["detections"], chains, staff_chains, weights, state["frame_count"],
+                            state["max_hold"], state["switch_penalty"])
     pred = {f: {"present": "1", "x": f"{e[0]:.1f}", "y": f"{e[1]:.1f}"} for f, e in enumerate(staff) if e}
-    metrics = position_metrics(read_rows(args.gt), pred, default["radius"])
+    metrics = position_metrics(read_rows(gt_path), pred, state["radius"])
     hits = next(v for k, v in metrics.items() if k.startswith("hits"))
     labelled, median = metrics["labelled frames"], metrics["median distance (px)"]
-    final = "final result"
-    rows += [row(6, final, "", CONFIRMED.name, f"hits of {labelled}", "", hits, "-",
-                 f"{hits} of {labelled} ({hits / labelled:.1%})", chart=True, limit=labelled),
-             row(6, final, "", CONFIRMED.name, "median error (px)", "", round(median, 1), "-", f"{median:.1f}")]
-    return rows
+    return [row(number, decision, "", setting, f"hits of {labelled}", "", hits, "-",
+                f"{hits} of {labelled} ({hits / labelled:.1%})", chart=True, limit=labelled),
+            row(number, decision, "", setting, "median error (px)", "", round(median, 1), "-", f"{median:.1f}")]
 
 
 # ---- output -----------------------------------------------------------------------------------
@@ -197,7 +213,8 @@ def save_csv(path, rows):
 
 def save_chart(path, rows):
     charted = [r for r in rows if r["chart"]]
-    fig, axes = plt.subplots(2, 3, figsize=(12, 6.4))
+    columns = (len(charted) + 1) // 2
+    fig, axes = plt.subplots(2, columns, figsize=(4 * columns, 6.4))
     for ax, r in zip(axes.ravel(), charted):
         names = [r["alternative"], r["default"] + " (default)"] if r["alternative"] else [r["default"]]
         values = ([r["alternative_value"]] if r["alternative"] else []) + [r["default_value"]]

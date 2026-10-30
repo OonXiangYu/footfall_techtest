@@ -184,7 +184,7 @@ the value in `results\summary.md`. It also checks that `staff.csv` and `decision
 | `eval\eval_linking.py <run>` | which tracker gate and linking settings keep one person per track (purity)? | ~14 s |
 | `eval\eval_run.py <run>` | how close is the output to the labels: hits, presence, per-track and frame-by-frame errors? | ~1 s |
 | `eval\eval_review.py <run>` | how much does a short review give: candidate ranking, simulated users, expansion threshold? | ~30 s (6 s with caches) |
-| `eval\decisions.py --run <run>` | what does each key decision buy, against its alternative with everything else unchanged? | ~25 s |
+| `eval\decisions.py --run <run>` | what does each key decision buy, against its alternative with everything else unchanged? | ~30 s |
 
 ### Key decisions
 
@@ -199,13 +199,15 @@ against the alternative, with everything else unchanged. It writes one table to
 4. linking ratio test: off vs 0.5 (chain purity, staff chain changes);
 5. duplicate-box removal: off vs on (chain purity, staff chain changes, and the chain covering
    the seated stretch, frames 0-347);
-6. the final result with `examples\sample_confirmed.json` (hits, median error).
+6. the final result with `examples\sample_confirmed.json` (hits, median error);
+7. the oracle reference, `--tag oracle` with `data\tag_gt.csv`: every track with at least 2
+   hand-labelled tag sightings counts as staff (hits, median error).
 
-Decisions 1-2 run the detector on the 55 labelled frames. Decisions 3-6 reuse the detection and
+Decisions 1-2 run the detector on the 55 labelled frames. Decisions 3-7 reuse the detection and
 appearance caches of a run folder (`--run`, default `outputs\reproduce`) and pass the alternative
 as a `staff_detect.py` flag: `--max-dist 0.20`, `--link-ratio 0`, `--keep-duplicates`.
 
-In total it takes about 5 minutes from scratch and under a minute with `--keep-caches`, measured
+In total it takes about 6 minutes from scratch and about a minute with `--keep-caches`, measured
 on the development machine. Each script also runs on its own, for example
 `.venv\Scripts\python.exe eval\eval_run.py outputs\final`.
 

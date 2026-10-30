@@ -18,3 +18,5 @@ unchanged. Made by `eval/decisions.py`; staff hits and purity are measured on th
 | 5 | duplicate-box removal: off -> **on** | chain on the seated stretch (frames 0-347), frames | 229 (0-228) | **348 (0-347)** |
 | 6 | final result: sample_confirmed.json | hits of 55 | - | **50 of 55 (90.9%)** |
 | 6 | final result: sample_confirmed.json | median error (px) | - | **15.6** |
+| 7 | oracle (hand tag labels): tag_gt.csv | hits of 55 | - | **17 of 55 (30.9%)** |
+| 7 | oracle (hand tag labels): tag_gt.csv | median error (px) | - | **16.1** |
