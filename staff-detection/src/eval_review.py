@@ -19,7 +19,7 @@ from eval_pipeline import position_metrics, read_rows
 from appearance import similarity
 from fisheye import ANGLE_STEPS, owning_box, to_panorama_point
 from review import (CANDIDATE_SPACING, CANDIDATES_PER_CHAIN, CONFIRM_WINDOW, EXPAND_MARGIN, EXPAND_SIMILARITY,
-                    EXPAND_SPEED, GRID, candidates, chain_summaries, expand, staff_from_clicks)
+                    EXPAND_SPEED, PER_PAGE, candidates, chain_summaries, expand, staff_from_clicks)
 from staff_detect import build_chains, parse_args as pipeline_args, review_scores, staff_per_frame, video_info
 from tag_crops import interpolate_chest
 
@@ -104,7 +104,7 @@ def chain_purity(chains_marked, chains, frames, owners):
 
 def page_user(ranked, truth, pages):
     """Confirms every candidate on the first pages that really is the staff member."""
-    shown = GRID[0] * GRID[1] * pages
+    shown = PER_PAGE * pages
     return [(c["chain"], c["frame"]) for c, ok in zip(ranked[:shown], truth[:shown]) if ok]
 
 
@@ -146,7 +146,7 @@ def main():
     owners = staff_chain_per_frame(detections, chains, gt_points)
     truth = candidate_truth(detections, state["frame_rows"], chains, ranked, interpolate_chest(args.gt), owners)
 
-    per_page = GRID[0] * GRID[1]
+    per_page = PER_PAGE
     print(f"\nCandidates: {len(ranked)} (best {CANDIDATES_PER_CHAIN} per chain, top spread >= "
           f"{CANDIDATE_SPACING:g} s apart); {sum(truth)} of them are the staff member")
     for k in (5, 10, 20):

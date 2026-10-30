@@ -27,8 +27,8 @@ from fisheye import ANGLE_STEPS, circle_for, owning_box, to_original_point, to_p
 from linking import (LINK_GAP, LINK_MARGIN, LINK_RATIO, LINK_SPEED, LONG_DISTANCE, LONG_GAP, MAX_LINK_DIST,
                      chain_ids, link_tracks, track_summaries)
 from pose import POSE_WEIGHTS, body_canvas, body_frame, keypoints_to_original, run_pose
-from review import (CONFIRM_WINDOW, EXPAND_SIMILARITY, candidates, load_confirmed, review, save_confirmed,
-                    staff_from_clicks)
+from review import (CONFIRM_WINDOW, EXPAND_SIMILARITY, PER_PAGE, candidates, load_confirmed, review,
+                    save_confirmed, staff_from_clicks)
 from tag_crops import interpolate_chest
 from tag_model import best_position, llr, load_model
 from tracker import Tracker
@@ -55,6 +55,10 @@ def parse_args(argv=None):
     parser.add_argument("--confirm-scope", choices=["chain", "window"], default="chain",
                         help="--tag review: a confirmation marks its whole linked chain as staff (chain), or only "
                              "the part within --confirm-window seconds of the clicked frame (window)")
+    parser.add_argument("--per-page", type=int, default=PER_PAGE,
+                        help="--tag review: candidates per review page (4 per row)")
+    parser.add_argument("--ui-height", type=int, default=None,
+                        help="--tag review: maximum review window height in px (default: fit the screen)")
     parser.add_argument("--confirm-window", type=float, default=CONFIRM_WINDOW,
                         help="--tag review --confirm-scope window: seconds either side of the click")
     parser.add_argument("--tag-labels", help="tag_gt.csv (y/n/u per frame), required for --tag oracle")
@@ -434,7 +438,8 @@ def review_staff(args, out, fps, state):
         scores = review_scores(args, out, state)
         ranked = candidates(detections, chains, scores, fps)
         print(f"   review: {len(ranked)} candidates; opening the review page")
-        picked = [ranked[i] for i in review(args.video, detections, ranked, bool(detections["use_pano"]))]
+        picked = [ranked[i] for i in review(args.video, detections, ranked, bool(detections["use_pano"]),
+                                            args.per_page, args.ui_height)]
         save_confirmed(out / "confirmed.json", picked, np.flatnonzero(keep))
         clicks = [(c["chain"], c["frame"]) for c in picked]
         print(f"   confirmed {len(picked)} candidate(s) on {len({c for c, _ in clicks})} chain(s); "

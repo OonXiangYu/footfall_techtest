@@ -23,8 +23,8 @@ A single video is not enough data for the automatic tag detector to work across 
 mode a person confirms the staff member once, on a review page, and everything else stays automatic.
 
 1. **Run and review.** Detection, tracking and linking run as usual; then a review window shows the
-   people most likely to be wearing the tag, 12 per page (chest crop, and the full frame with the
-   person outlined):
+   people most likely to be wearing the tag, 8 per page (chest crop, and the full frame with the
+   person outlined). The window is scaled to fit the screen:
 
    ```
    .venv\Scripts\python.exe src\staff_detect.py --video data\sample.mp4 --out outputs\run_review --tag review
@@ -32,7 +32,9 @@ mode a person confirms the staff member once, on a review page, and everything e
 
    - Click a candidate to mark it as the staff member (click again to undo).
    - The staff member may change clothes: confirm one candidate per outfit.
-   - `n` / `p`: next / previous page. `Enter`: done.
+   - `n` / `p`: next / previous page. `Enter`: done. (The keys are also printed in the terminal.)
+   - `--per-page 8` sets the candidates per page (4 per row); `--ui-height 700` caps the window
+     height in pixels if the automatic fit does not suit your screen.
 
    The confirmations are saved to `outputs\run_review\confirmed.json`, and the run finishes with
    `staff.csv`, `annotated.mp4` and `timeline.png` in the same folder.
@@ -74,13 +76,13 @@ Simulated with the hand labels (`eval_review.py`), whole-track confirmation:
 
 | | confirmations | position hits (of 55 labelled frames) | median error | frames with the staff marked | marked frames really the staff |
 |---|---|---|---|---|---|
-| confirm every staff candidate on page 1 | 6 | 9 | 44 px | 454 | 79% |
-| confirm every staff candidate on pages 1-2 | 9 | 15 | 43 px | 718 | 84% |
+| confirm every staff candidate on page 1 (8 shown) | 5 | 9 | 16 px | 365 | 100% |
+| confirm every staff candidate on pages 1-2 (16 shown) | 7 | 13 | 44 px | 657 | 82% |
 | one confirmation per outfit, 2 clicks, + expansion | 2 | 11 | 14 px | 329 | 100% |
 | oracle (hand tag labels on every 5th frame) | - | 21 | 20 px | 687 | - |
 
 A hit is a predicted point within 0.10 of the fisheye radius (48 px) of the labelled chest point.
-4 of the top 5 review candidates were the staff member (6 of the 12 on page 1). Confirming more
+4 of the top 5 review candidates were the staff member (5 of the 8 on page 1). Confirming more
 candidates covers more of the video, but some tracks switch to another person for part of their
 length, so purity drops below 100%. The staff member is hard to find while seated (the tag is
 not visible), so the seated stretch at the start is rarely among the candidates.

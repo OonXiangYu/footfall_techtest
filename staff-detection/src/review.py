@@ -14,7 +14,11 @@ from fisheye import box_outline
 CANDIDATES_PER_CHAIN = 2  # a chain's best-scoring frames offered for review
 CANDIDATE_SPACING = 2.0  # seconds: at most one candidate per window this long
 MAX_CANDIDATES = 96
-GRID = (4, 3)  # columns x rows per review page
+COLUMNS = 4  # tiles per row on a review page
+PER_PAGE = 8  # tiles per page (4 x 2 keeps them large enough to recognise people)
+FALLBACK_SCREEN = (1280, 800)  # if the screen size cannot be read
+SCREEN_USE = (0.95, 0.85)  # share of the screen the window may take (leaves room for title bar / taskbar)
+KEYS_HELP = "Review keys: click a tile = toggle staff, n = next page, p = previous page, Enter = done"
 CROP_SIZE, THUMB_SIZE = 200, (200, 150)
 LABEL_HEIGHT = 34
 WINDOW = "staff review"
@@ -95,9 +99,10 @@ def candidate_tiles(video, detections, candidates_, use_pano):
     return tiles
 
 
-def page_image(tiles, page, selected):
-    columns, rows = GRID
-    per_page = columns * rows
+def page_image(tiles, page, selected, per_page=PER_PAGE):
+    """The page at full size, and its layout (x0, y0, step_x, step_y, columns, rows) in those pixels."""
+    columns = min(COLUMNS, per_page)
+    rows = (per_page + columns - 1) // columns
     tile_h, tile_w = tiles[0].shape[:2]
     pad = 6
     header = 56
@@ -118,31 +123,71 @@ def page_image(tiles, page, selected):
             cv2.rectangle(image, (x - 3, y - 3), (x + tile_w + 2, y + tile_h + 2), (0, 220, 0), 4)
             cv2.putText(image, "STAFF", (x + tile_w - 70, y + 23), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2,
                         cv2.LINE_AA)
-    return image, (pad, header + pad, tile_w + pad, tile_h + pad)
+    return image, (pad, header + pad, tile_w + pad, tile_h + pad, columns, rows)
 
 
-def review(video, detections, candidates_, use_pano):
+def screen_size():
+    """(width, height) of the screen, or FALLBACK_SCREEN if it cannot be read."""
+    try:
+        import tkinter
+        root = tkinter.Tk()
+        root.withdraw()
+        size = (root.winfo_screenwidth(), root.winfo_screenheight())
+        root.destroy()
+        return size
+    except Exception:  # no display / no tkinter: fall back to a size that fits most laptops
+        return FALLBACK_SCREEN
+
+
+def fit_scale(image_size, ui_height=None):
+    """Scale (<= 1) that makes a page of image_size (width, height) fit the screen, or ui_height px tall."""
+    width, height = image_size
+    screen_w, screen_h = screen_size()
+    max_w, max_h = screen_w * SCREEN_USE[0], screen_h * SCREEN_USE[1]
+    if ui_height:
+        max_h = ui_height
+    return min(1.0, max_w / width, max_h / height)
+
+
+def tile_at(x, y, layout, scale, page, per_page, count):
+    """Candidate index under a click at (x, y) in the shown (scaled) window, or None."""
+    x0, y0, step_x, step_y, columns, rows = layout
+    x, y = x / scale, y / scale  # back to full-size page pixels
+    column, row = int((x - x0) // step_x), int((y - y0) // step_y)
+    if not (0 <= column < columns and 0 <= row < rows):
+        return None
+    # the gap to the right of / below a tile is not part of it
+    if (x - x0) % step_x >= step_x - 6 or (y - y0) % step_y >= step_y - 6:
+        return None
+    slot = row * columns + column
+    i = page * per_page + slot
+    return i if slot < per_page and i < count else None
+
+
+def review(video, detections, candidates_, use_pano, per_page=PER_PAGE, ui_height=None):
     """Show the candidates page by page; returns the indices of the clicked (confirmed) candidates."""
     tiles = candidate_tiles(video, detections, candidates_, use_pano)
-    columns, rows = GRID
-    per_page = columns * rows
     pages = (len(tiles) + per_page - 1) // per_page
+    full, _ = page_image(tiles, 0, set(), per_page)
+    scale = fit_scale((full.shape[1], full.shape[0]), ui_height)
+    print(f"   {KEYS_HELP}")
+    print(f"   {len(tiles)} candidates on {pages} page(s) of {per_page}; window scaled to {scale:.0%} "
+          f"({round(full.shape[1] * scale)} x {round(full.shape[0] * scale)} px; --ui-height to change)")
     state = {"page": 0, "selected": set(), "layout": None}
 
     def on_mouse(event, x, y, flags, _):
         if event != cv2.EVENT_LBUTTONDOWN or state["layout"] is None:
             return
-        x0, y0, step_x, step_y = state["layout"]
-        column, row = (x - x0) // step_x, (y - y0) // step_y
-        if 0 <= column < columns and 0 <= row < rows:
-            i = state["page"] * per_page + row * columns + column
-            if i < len(tiles):
-                state["selected"] ^= {i}
+        i = tile_at(x, y, state["layout"], scale, state["page"], per_page, len(tiles))
+        if i is not None:
+            state["selected"] ^= {i}
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
     cv2.setMouseCallback(WINDOW, on_mouse)
     while True:
-        image, state["layout"] = page_image(tiles, state["page"], state["selected"])
+        image, state["layout"] = page_image(tiles, state["page"], state["selected"], per_page)
+        if scale < 1:
+            image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         cv2.imshow(WINDOW, image)
         key = cv2.waitKey(30) & 0xFF
         if key in (13, 10) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
