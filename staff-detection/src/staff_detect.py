@@ -47,7 +47,8 @@ def parse_args():
                         help="task PDF; --tag auto takes its tag template from the first photo")
     parser.add_argument("--imgsz", type=int, default=1440)
     parser.add_argument("--conf", type=float, default=0.25)
-    parser.add_argument("--max-dist", type=float, default=0.20, help="tracker gate, fraction of the radius")
+    parser.add_argument("--max-dist", type=float, default=0.05,
+                        help="tracker gate, fraction of the radius (0.05 ~ staff max speed; wider gates swap people)")
     parser.add_argument("--max-missed", type=float, default=1.0, help="seconds a track may go unmatched")
     parser.add_argument("--link-gap", type=float, default=1.5, help="max seconds between linked tracklets")
     parser.add_argument("--link-speed", type=float, default=0.01,

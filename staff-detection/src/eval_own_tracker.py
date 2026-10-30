@@ -13,11 +13,13 @@ from eval_tracking import count_id_changes, id_color, staff_track_id
 from tracker import Tracker
 
 MAX_MISSED_SECONDS = 1.0
+# tracker gate (fraction of the radius): ~ the staff max speed; wider gates swap people (low purity)
+DEFAULT_GATE = 0.05
 SETTINGS = [  # (name, max_dist as a fraction of the radius, use velocity)
-    ("dist0.05", 0.05, True),
+    (f"dist{DEFAULT_GATE:.2f}", DEFAULT_GATE, True),
     ("dist0.10", 0.10, True),
     ("dist0.20", 0.20, True),
-    ("dist0.10_novel", 0.10, False),
+    (f"dist{DEFAULT_GATE:.2f}_novel", DEFAULT_GATE, False),
 ]
 COMPARE_RANGE = (300, 600)  # same frames as the ByteTrack run
 TRAIL_LENGTH = 15
@@ -59,13 +61,27 @@ def staff_ids_at_gt(detections, frame_rows, ids, gt_points):
     return staff
 
 
+# for each staff track id: (labelled frames it is on the GT point, labelled frames it exists on).
+# A break gives several pure ids (on == total); a swap gives an id that is also on someone else (on < total).
+def track_purity(staff, ids, frame_rows):
+    purity = {}
+    for track_id in sorted({i for i in staff.values() if i is not None}):
+        present = [f for f in staff if track_id in ids[frame_rows[f]]]
+        on_point = sum(staff[f] == track_id for f in present)
+        purity[track_id] = (on_point, len(present))
+    return purity
+
+
 def evaluate(name, detections, frame_rows, gt_points, max_dist_fraction, use_velocity):
     max_dist = max_dist_fraction * float(detections["radius"])
     max_missed = round(MAX_MISSED_SECONDS * float(detections["fps"]))
     ids = run_tracker(detections, frame_rows, max_dist, max_missed, use_velocity)
     staff = staff_ids_at_gt(detections, frame_rows, ids, gt_points)
     in_range = [staff[f] for f in staff if COMPARE_RANGE[0] <= f <= COMPARE_RANGE[1]]
-    return {"name": name, "ids": ids, "staff": staff,
+    purity = track_purity(staff, ids, frame_rows)
+    on_point, total = (sum(p[i] for p in purity.values()) for i in (0, 1))
+    return {"name": name, "ids": ids, "staff": staff, "purity": purity,
+            "purity_rate": on_point / total if total else float("nan"),
             "unique_ids": len(set(ids.tolist())),
             "median_length": float(np.median(list(Counter(ids.tolist()).values()))),
             "changes": count_id_changes(list(staff.values())),
@@ -73,14 +89,18 @@ def evaluate(name, detections, frame_rows, gt_points, max_dist_fraction, use_vel
 
 
 def print_table(rows):
-    print(f"\n{'setting':<16}{'unique IDs':>11}{'median len':>11}{'ID changes':>11}"
-          f"{'changes 300-600':>17}")
+    print(f"\n{'setting':<18}{'purity':>8}{'impure IDs':>12}{'ID changes':>12}{'changes 300-600':>17}"
+          f"{'unique IDs':>12}{'median len':>12}")
     for row in rows:
-        print(f"{row['name']:<16}{row['unique_ids']:>11}{row['median_length']:>11.0f}"
-              f"{row['changes']:>11}{row['changes_in_range']:>17}")
+        impure = sum(on < total for on, total in row["purity"].values())
+        impure_text = f"{impure}/{len(row['purity'])}"
+        print(f"{row['name']:<18}{row['purity_rate']:>8.0%}{impure_text:>12}{row['changes']:>12}"
+              f"{row['changes_in_range']:>17}{row['unique_ids']:>12}{row['median_length']:>12.0f}")
     for row in rows:
         sequence = " ".join("-" if i is None else str(i) for i in row["staff"].values())
         print(f"\n{row['name']} staff IDs at GT frames:\n  {sequence}")
+        impure = [f"{i}:{on}/{total}" for i, (on, total) in row["purity"].items() if on < total]
+        print(f"  also on someone else (id:on GT/labelled frames present): {' '.join(impure) or 'none'}")
 
 
 def draw_tracks(frame, points, ids, trails, staff_id, gt_point, index):
@@ -141,7 +161,8 @@ def main():
             for name, fraction, use_velocity in SETTINGS]
     print_table(rows)
 
-    best = min(rows, key=lambda r: (r["changes"], r["unique_ids"]))
+    # purity first: few ID changes can also mean the track swapped onto someone else
+    best = max(rows, key=lambda r: (r["purity_rate"], -r["changes"]))
     path = ROOT / "outputs" / f"own_track_{best['name']}.mp4"
     save_video(path, args.video, detections, frame_rows, best, gt_points)
     print(f"\nBest setting: {best['name']} -> {path}")
