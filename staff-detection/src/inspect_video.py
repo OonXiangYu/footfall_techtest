@@ -1,5 +1,3 @@
-"""Inspect a video: metadata, true frame count, brightness profile, contact sheets."""
-
 import argparse
 from pathlib import Path
 

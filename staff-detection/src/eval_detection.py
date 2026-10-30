@@ -11,11 +11,11 @@ from ultralytics import YOLO
 
 ROOT = Path(__file__).resolve().parent.parent
 MISSES_DIR = ROOT / "outputs" / "misses"
-ANGLE_STEPS = 1440  # panorama width: one column per 0.25 degree
+ANGLE_STEPS = 1440 
 PROBE_FRAMES = 50
 DEFAULT_IMGSZ = 1440
 DEFAULT_CONF = 0.25
-SETTINGS = [(640, 0.25), (1440, 0.25), (1440, 0.10), (1600, 0.25)]  # (imgsz, conf) for --compare
+SETTINGS = [(640, 0.25), (1440, 0.25), (1440, 0.10), (1600, 0.25)]  # (imgsz, conf) for compare
 BORDER_THRESHOLD = 20
 SEAM_PAD = 0.10  # fraction of panorama columns repeated past the right edge
 SEAM_OVERLAP = 0.6  # overlap (intersection / smaller box) above which two seam boxes are one person
@@ -32,17 +32,15 @@ def parse_args():
                         help="evaluate every entry in SETTINGS instead of --imgsz/--conf")
     return parser.parse_args()
 
-
+# read from gt.csv for those for eval
 def load_gt_points(path):
-    """Frames that are "present" and have a clicked point -> (x, y)."""
     with open(path, newline="") as f:
         return {int(row["frame"]): (int(row["x"]), int(row["y"]))
                 for row in csv.DictReader(f)
                 if row["status"] == "present" and row["x"] and row["y"]}
 
-
+# read the frames and just save thos needed
 def read_frames(video_path, wanted):
-    """Read the video sequentially and keep only the frames whose index is in `wanted`."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise SystemExit(f"Could not open video: {video_path}")
@@ -59,9 +57,8 @@ def read_frames(video_path, wanted):
     cap.release()
     return frames
 
-
+# find the circle on the fish eye
 def find_fisheye_circle(frame):
-    """Return (center, radius) of the fisheye image circle, or None if there is no clear one."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     bright = (gray > BORDER_THRESHOLD).astype(np.uint8) * 255
     bright = cv2.morphologyEx(bright, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8))
@@ -73,38 +70,24 @@ def find_fisheye_circle(frame):
     circle = np.zeros_like(bright)
     cv2.circle(circle, (round(cx), round(cy)), round(radius), 255, -1)
     outside = circle == 0
-    # Without a real dark border the "circle" just encloses the whole frame (normal camera,
-    # or a fisheye whose image circle is cropped by the frame).
     if outside.mean() < 0.05 or (bright[outside] == 0).mean() < 0.9:
         return None
-    # The bright region should fill most of the circle that is inside the frame.
+    # the bright region should fill most of the circle that is inside the frame.
     if (bright[~outside] > 0).mean() < 0.7:
         return None
     return (cx, cy), radius
 
-
+# if cant find the circle this si the default
 def fallback_circle(frame):
-    """Frame center, radius reaching the left and right edges."""
     h, w = frame.shape[:2]
     return (w / 2, h / 2), max(w, h) / 2
 
-
 def unwarp(frame, center, radius):
-    """Fisheye -> panorama: angle along x, distance from the center along y (rim at the top)."""
     polar = cv2.warpPolar(frame, (round(radius), ANGLE_STEPS), center, radius, cv2.WARP_POLAR_LINEAR)
     return cv2.rotate(polar, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-
+# convert the location of point on the ori img to the wnwarp img and see if its in the frame of YOLO
 def to_panorama_point(x, y, center, radius):
-    """Map an original-image point to panorama coordinates, or None if outside the circle.
-
-    warpPolar puts angle on the rows and distance on the columns:
-        polar_row = theta * ANGLE_STEPS / (2*pi),   polar_col = rho * polar_width / radius
-    with theta = atan2(y - cy, x - cx). Because image y points down, increasing theta turns
-    clockwise on screen, which is also the direction warpPolar uses (checked by warping a
-    single bright dot and finding it in the output). ROTATE_90_COUNTERCLOCKWISE then maps
-    polar (row, col) to panorama (x = row, y = polar_width - 1 - col).
-    """
     dx, dy = x - center[0], y - center[1]
     rho = math.hypot(dx, dy)
     if rho >= radius:
@@ -115,23 +98,27 @@ def to_panorama_point(x, y, center, radius):
     pano_y = polar_width - 1 - rho * polar_width / radius
     return pano_x, pano_y
 
+# exact inverse of to_panorama_point; x past the right edge (seam padding) wraps to the start
+def to_original_point(pano_x, pano_y, center, radius):
+    polar_width = round(radius)
+    theta = (pano_x % ANGLE_STEPS) * 2 * math.pi / ANGLE_STEPS
+    rho = (polar_width - 1 - pano_y) * radius / polar_width
+    return center[0] + rho * math.cos(theta), center[1] + rho * math.sin(theta)
 
+# detect and return the box that encoded human
 def detect(model, image, imgsz, conf):
-    """Person boxes as an (N, 4) xyxy array, plus the wall-clock time of the model call in ms."""
     start = time.perf_counter()
     result = model(image, classes=[0], imgsz=imgsz, conf=conf, verbose=False)[0]
     elapsed_ms = (time.perf_counter() - start) * 1000
     return result.boxes.xyxy.cpu().numpy(), elapsed_ms
 
-
+# duplicate the most left side to the right side to let the people at the cutting side can be completed
 def pad_seam(pano):
-    """Repeat the first SEAM_PAD of the columns after the right edge, so people on the seam are whole."""
     pad = round(pano.shape[1] * SEAM_PAD)
     return np.hstack([pano, pano[:, :pad]])
 
-
+# cal how much two boxes is overlap to determine is the person get encoded twice
 def overlap(a, b):
-    """Intersection area over the smaller box's area."""
     width = min(a[2], b[2]) - max(a[0], b[0])
     height = min(a[3], b[3]) - max(a[1], b[1])
     if width <= 0 or height <= 0:
@@ -139,15 +126,8 @@ def overlap(a, b):
     smaller = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
     return width * height / smaller
 
-
+# after filling the cutting side someone might be box twice so just leaves one
 def merge_seam_boxes(boxes, pano_width):
-    """Fold detections from the seam padding back onto the panorama.
-
-    A box entirely inside the padding is shifted back by pano_width, unless the same person
-    was already found at the left edge. A box that crosses the seam is the only complete view
-    of that person, so it is kept as is (x2 > pano_width) and its truncated copy at the left
-    edge is dropped.
-    """
     inside = [b for b in boxes if b[2] <= pano_width]
     merged = []
     for box in (b for b in boxes if b[2] > pano_width):
@@ -160,12 +140,8 @@ def merge_seam_boxes(boxes, pano_width):
             merged.append(box)
     return np.array(inside + merged, dtype=float).reshape(-1, 4)
 
-
+# check whether need to unwarp as not all the img is capture by fish eye
 def detect_view(model, frame, circle, use_pano, imgsz, conf):
-    """Run detection on the panorama (seam-padded) or the original frame.
-
-    Returns the image the boxes refer to, the boxes, and the model time in ms.
-    """
     if not use_pano:
         boxes, elapsed_ms = detect(model, frame, imgsz, conf)
         return frame, boxes, elapsed_ms
@@ -174,13 +150,11 @@ def detect_view(model, frame, circle, use_pano, imgsz, conf):
     boxes, elapsed_ms = detect(model, padded, imgsz, conf)
     return padded, merge_seam_boxes(boxes, pano.shape[1]), elapsed_ms
 
-
 def count_people(model, frames, circle, use_pano, imgsz, conf):
     return sum(len(detect_view(model, f, circle, use_pano, imgsz, conf)[1]) for f in frames)
 
-
+# determine whether test on ori img or unwarp img
 def choose_view(mode, model, probe_frames, circle, imgsz, conf):
-    """Return True to run detection on the panorama, False for the original frame."""
     if mode != "auto":
         return mode == "on"
     on_pano = count_people(model, probe_frames, circle, True, imgsz, conf)
@@ -190,14 +164,13 @@ def choose_view(mode, model, probe_frames, circle, imgsz, conf):
           f"{on_original} on original -> {'panorama' if use_pano else 'original frame'}")
     return use_pano
 
-
+# determine is the point in any box
 def point_in_any_box(point, boxes, wrap_width=None):
-    """wrap_width: panorama width, so a point near x=0 also matches boxes that cross the seam."""
     candidates = [point] if wrap_width is None else [point, (point[0] + wrap_width, point[1])]
     return any(x1 <= x <= x2 and y1 <= y <= y2
                for x, y in candidates for x1, y1, x2, y2 in boxes)
 
-
+# save those frame who miss with detail
 def save_miss(path, image, boxes, points):
     image = image.copy()
     for x1, y1, x2, y2 in boxes.astype(int):
@@ -206,7 +179,7 @@ def save_miss(path, image, boxes, points):
         cv2.drawMarker(image, (round(x), round(y)), (0, 0, 255), cv2.MARKER_CROSS, 24, 3)
     cv2.imwrite(str(path), image)
 
-
+# evalution
 def evaluate_setting(model, frames, gt_points, circle, use_pano, imgsz, conf):
     name = f"{'pano' if use_pano else 'orig'}_imgsz{imgsz}_conf{conf:.2f}"
     miss_dir = MISSES_DIR / name
